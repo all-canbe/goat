@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+setting.json
+
+# Runtime
+subagents.json
+*.tmp
+conversations.db
+tasks.db
+
+# IDE
+.vscode/
+.idea/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
