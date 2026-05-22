@@ -253,7 +253,7 @@ struct SubAgent {
   "subagents": [
     {
       "id": "uuid",
-      "name": "🐋 Blue Whale (explore)",
+      "name": "🐐 Ibex (explore)",
       "agent_type": "explore",
       "status": "Completed",
       "spawn_depth": 1,

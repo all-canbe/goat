@@ -11,11 +11,20 @@ setting.json
 subagents.json
 *.tmp
 conversations.db
+conversations.db-shm
+conversations.db-wal
 tasks.db
+tasks.db-shm
+tasks.db-wal
 
 # IDE
 .vscode/
 .idea/
+
+# Project spec/docs
+.trae/
+openspec/
+tips/
 
 # Virtual env
 venv/

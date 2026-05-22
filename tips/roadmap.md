@@ -268,4 +268,9 @@ class DurableTaskManager:
 | 交互体验 | ⚠️ CLI 模式，有对话历史管理但无 TUI |
 | 后台任务 | ✅ 已完成（DurableTaskManager: SQLite + Worker Pool + 跨 session 恢复） |
 
-**当前项目状态：** 三个核心模块 + Prompt 模板引擎全部完成。**下一步可从可选延伸模块中选择：Token 用量监控、多模型路由、插件系统等。**
+| 多模型 Provider | ✅ 已完成（Provider 抽象层：OpenAI 兼容 + Anthropic / /provider 和 /model 命令） |
+| Git 集成工具 | ✅ 已完成（git_status / git_diff / git_log / git_commit，已注册到 General + Implementer 角色） |
+| Token 用量监控与成本估算 | ✅ 已完成（TokenTracker: 模型定价表、按轮次跟踪、/cost 命令、/status 显示） |
+| 持久化会话保存/恢复 | ✅ 已完成（checkpoint save/resume、/resume、/fork 命令、自动断点提示） |
+
+**当前项目状态：** 三个核心模块 + Prompt 模板引擎 + 多模型 Provider + Git 工具 + Token 用量监控 + 会话持久化全部完成。**下一步可从可选延伸模块中选择：结构化输出契约、Web 搜索、插件系统等。**

@@ -8,7 +8,6 @@ SubAgent Demo — LangChain + 子 Agent 并行调度系统 + SQLite 对话管理
 启动后按提示输入 base_url、api_key、model 完成初始化。
 然后进入交互命令行，支持以下命令:
 
-    /chat <消息>          — 与主 Agent 对话（主 Agent 可自动 spawn 子 Agent，自动持久化）
     /spawn <角色> <任务>  — 手动创建子 Agent
     /list                 — 列出所有子 Agent
     /collect [ids]        — 收集子 Agent 结果
@@ -16,6 +15,7 @@ SubAgent Demo — LangChain + 子 Agent 并行调度系统 + SQLite 对话管理
     /eval <id> <msg>      — 向子 Agent 发送消息
     /sessions             — 列出对话历史
     /session [id]         — 切换会话
+    /new [title]          — 创建新会话
     /search <关键词>       — 搜索历史消息
     /export [id] [format] — 导出会话
     /skills               — 列出可用技能
@@ -41,22 +41,33 @@ from langchain_core.messages import (
 )
 from langchain_openai import ChatOpenAI
 
-from subagent_demo.cancellation import CancellationToken
-from subagent_demo.subagent_manager import SubAgentManager, SubAgentStatus
-from subagent_demo.subagent_roles import (
+from my_tui.core.cancellation import CancellationToken
+from my_tui.agent.subagent_manager import SubAgentManager, SubAgentStatus
+from my_tui.agent.subagent_roles import (
     RoleType, ROLE_REGISTRY, get_role, list_roles,
 )
-from subagent_demo.subagent_runtime import (
+from my_tui.agent.subagent_runtime import (
     AgentContext, _run_agent_loop, _build_subagent_tools, MAX_AGENT_TURNS,
 )
-from subagent_demo.skill_system import SkillRegistry, Skill
-from subagent_demo.tools import get_tools_by_names, BUILTIN_TOOLS
-from subagent_demo.conversation_manager import ConversationManager, SessionInfo
-from subagent_demo.event_bus import EventBus, EventType
-from subagent_demo.durable_task_manager import (
+from my_tui.agent.skill_system import (
+    SkillRegistry, Skill,
+    load_skill_from_directory,
+    discover_skill_directories,
+)
+from my_tui.tools.tools import get_tools_by_names, BUILTIN_TOOLS
+from my_tui.conversation.conversation_manager import ConversationManager, SessionInfo
+from my_tui.core.event_bus import EventBus, EventType
+from my_tui.tasks.durable_task_manager import (
     DurableTaskManager, TaskDef, TaskContext, TaskType, TaskStatus,
 )
-from subagent_demo.prompt_engine import engine as prompt_engine
+from my_tui.conversation.prompt_engine import engine as prompt_engine
+from my_tui.provider.provider import (
+    ProviderType, ProviderConfig, create_llm, get_provider_display,
+    parse_provider, get_available_providers, PROVIDER_DEFAULTS, PROVIDER_DISPLAY_NAMES,
+)
+from my_tui.core.token_tracker import TokenTracker, calculate_cost, format_cost
+from my_tui.security.approval import ToolApprovalSystem, PermissionMode, ApprovalPolicy, Decision
+from my_tui.conversation.context_compression import CompactionConfig
 
 
 SETTINGS_FILE = Path("setting.json")
@@ -64,7 +75,7 @@ SETTINGS_FILE = Path("setting.json")
 
 BANNER = r"""
 ╔══════════════════════════════════════════════════════╗
-║      🐋 SubAgent Demo — 子 Agent 并行调度系统        ║
+║      � SubAgent Demo — 子 Agent 并行调度系统        ║
 ║      LangChain + asyncio + SQLite 对话管理           ║
 ╚══════════════════════════════════════════════════════╝
 """
@@ -72,10 +83,14 @@ BANNER = r"""
 HELP_TEXT = """
 模式说明:
   默认 [Agent 模式] — 直接输入内容即与 AI 对话
-  输入 /mode 切换到 [命令模式] — 所有输入均视为命令
+  输入 /mode 切换到 [命令模式] — 提示符变化，两种模式下均支持直接输入聊天或 / 命令
+
+审批模式:
+  /agent                — 默认模式，每次操作询问确认
+  /plan                 — 只读调查模式，写操作/Shell 全部阻止
+  /yolo                 — 全部自动批准（安全守卫仍生效）
 
 可用命令:
-  /chat <消息>          — 与主 Agent 对话 (命令模式下使用)
   /mode                 — 切换 Agent/命令模式
   /spawn <角色> <任务>  — 手动创建子 Agent
   /list                 — 列出所有子 Agent 及其状态
@@ -84,7 +99,13 @@ HELP_TEXT = """
   /eval <id> <msg>      — 向运行中的子 Agent 发送消息
   /skills               — 列出已注册的技能
   /roles                — 列出可用的角色类型
+  /provider [type]      — 显示/切换 LLM Provider (openai_compatible, anthropic)
+  /model [name]         — 显示/切换当前模型
+  /cost                 — 显示 Token 用量统计与估算成本
+  /resume [id]          — 恢复最近或指定会话（保留上下文）
+  /fork <id> [turn]     — 基于历史会话的指定轮次分叉新会话
   /status               — 显示系统状态（含对话统计）
+  /new [title]          — 创建新会话
   /sessions             — 列出所有对话历史
   /session [id]         — 切换会话 (不带 id 则列出)
   /session_rename <id> <name> — 重命名会话
@@ -132,6 +153,9 @@ class CLI:
         self.running = True
         self.main_agent_id = "main"
         self.agent_mode = True
+        self.provider_config: ProviderConfig | None = None
+        self.token_tracker: TokenTracker | None = None
+        self.approval_system: ToolApprovalSystem | None = None
         self._event_listener_task: asyncio.Task | None = None
 
     def _load_settings(self) -> dict | None:
@@ -145,8 +169,10 @@ class CLI:
         return None
 
     def _save_settings(self, base_url: str, api_key: str, model: str,
-                       max_concurrent: int, max_depth: int) -> None:
+                       max_concurrent: int, max_depth: int,
+                       provider: str = "openai_compatible") -> None:
         data = {
+            "provider": provider,
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
@@ -158,32 +184,76 @@ class CLI:
         except OSError as e:
             print(f"  ⚠️ 配置保存失败: {e}")
 
+    def _prompt_provider_selection(self) -> ProviderConfig:
+        providers = get_available_providers()
+        print("\n  选择 LLM Provider:")
+        for i, p in enumerate(providers, 1):
+            print(f"    {i}. {p['display']} (默认模型: {p['default_model']})")
+        print(f"    {len(providers) + 1}. 手动输入")
+
+        choice = input(f"\n  请选择 (1-{len(providers) + 1}, 默认 1): ").strip()
+        if not choice:
+            choice = "1"
+
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(providers):
+                selected = providers[idx]
+                provider_type = ProviderType(selected["key"])
+            else:
+                raise ValueError
+        except (ValueError, IndexError):
+            provider_type = ProviderType.OPENAI_COMPATIBLE
+
+        defaults = next(
+            (p for p in providers if p["key"] == provider_type.value),
+            providers[0],
+        )
+
+        base_url = input(f"  Base URL (默认 {defaults['default_base_url']}): ").strip()
+        if not base_url:
+            base_url = defaults["default_base_url"]
+
+        api_key = input("  API Key: ").strip()
+        while not api_key:
+            print("  API Key 不能为空")
+            api_key = input("  API Key: ").strip()
+
+        model = input(f"  模型名称 (默认 {defaults['default_model']}): ").strip()
+        if not model:
+            model = defaults["default_model"]
+
+        return ProviderConfig(
+            provider_type=provider_type,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+        )
+
     async def initialize(self) -> None:
         print(BANNER)
 
         settings = self._load_settings()
         if settings:
-            base_url = settings.get("base_url", "https://api.openai.com/v1")
+            provider_str = settings.get("provider", "openai_compatible")
+            provider_type = parse_provider(provider_str) or ProviderType.OPENAI_COMPATIBLE
+            base_url = settings.get("base_url", "")
             api_key = settings["api_key"]
-            model = settings.get("model", "gpt-4o")
+            model = settings.get("model", "")
             max_concurrent = min(settings.get("max_concurrent", 10), 20)
             max_depth = settings.get("max_depth", 3)
-            print(f"  读取已保存的配置: {model} | {base_url}\n")
+
+            self.provider_config = ProviderConfig(
+                provider_type=provider_type,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+            )
+            display = get_provider_display(self.provider_config)
+            print(f"  读取已保存的配置: {display}\n")
         else:
             print("请配置 LLM 连接参数:\n")
-
-            base_url = input("  Base URL (默认 https://api.openai.com/v1): ").strip()
-            if not base_url:
-                base_url = "https://api.openai.com/v1"
-
-            api_key = input("  API Key: ").strip()
-            while not api_key:
-                print("  API Key 不能为空")
-                api_key = input("  API Key: ").strip()
-
-            model = input("  模型名称 (默认 gpt-4o): ").strip()
-            if not model:
-                model = "gpt-4o"
+            self.provider_config = self._prompt_provider_selection()
 
             max_concurrent = input("  最大并发子 Agent 数 (默认 10): ").strip()
             try:
@@ -199,12 +269,7 @@ class CLI:
                 max_depth = 3
 
         print(f"\n  正在初始化...")
-        self.llm = ChatOpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            temperature=0.7,
-        )
+        self.llm = create_llm(self.provider_config)
         self.manager = SubAgentManager(
             max_concurrent=max_concurrent,
             max_spawn_depth=max_depth,
@@ -214,8 +279,17 @@ class CLI:
         self.conversations = ConversationManager(
             db_path="conversations.db",
             max_tokens=128000,
+            compression_config=CompactionConfig(
+                context_window=128000,
+                compaction_threshold_ratio=0.7,
+                micro_compact_tool_count=10,
+                micro_compact_min_tokens=5000,
+                collapse_min_tokens=15000,
+                hot_tail_size=3,
+                prefer_cache_stability=False,
+            ),
         )
-        await self.conversations.create_session(model=model, title="默认会话")
+        await self.conversations.create_session(model=self.provider_config.model, title="默认会话")
 
         self.event_bus = EventBus()
 
@@ -230,14 +304,32 @@ class CLI:
             print(f"  🔄 恢复 {len(recovered)} 个中断的任务")
 
         self._init_skills()
-        self._save_settings(base_url, api_key, model, max_concurrent, max_depth)
-        print(f"  ✅ 初始化完成 | 模型: {model} | 并发上限: {max_concurrent} | 深度上限: {max_depth}\n")
+        self.token_tracker = TokenTracker(model=self.provider_config.model)
+        self.approval_system = ToolApprovalSystem()
+        self.approval_system.auto_configure()
+        self.approval_system.set_mode(PermissionMode.DEFAULT)
+        self._save_settings(
+            self.provider_config.base_url,
+            self.provider_config.api_key,
+            self.provider_config.model,
+            max_concurrent,
+            max_depth,
+            provider=self.provider_config.provider_type.value,
+        )
+        print(f"  ✅ 初始化完成 | {get_provider_display(self.provider_config)} | 并发上限: {max_concurrent} | 深度上限: {max_depth}\n")
+
+        checkpoint = self.conversations.get_last_checkpoint()
+        if checkpoint:
+            print(f"  📌 发现上次退出时的会话断点:")
+            print(f"     会话: {checkpoint['title']}")
+            print(f"     消息: {checkpoint['message_count']} 条 | Token: {checkpoint['token_count']}")
+            print(f"     输入 /resume 恢复，或直接开始新对话")
 
     def _init_tasks(self) -> None:
         """注册内置持久化任务类型"""
 
         async def explore_codebase(ctx: TaskContext) -> str:
-            from subagent_demo.tools import BUILTIN_TOOLS
+            from my_tui.tools.tools import BUILTIN_TOOLS
             list_files = BUILTIN_TOOLS["list_files"]
             read_file = BUILTIN_TOOLS["read_file"]
 
@@ -258,7 +350,7 @@ class CLI:
 
         async def batch_process(ctx: TaskContext) -> str:
             cmds = ctx.metadata.get("commands", [])
-            from subagent_demo.tools import BUILTIN_TOOLS
+            from my_tui.tools.tools import BUILTIN_TOOLS
             execute = BUILTIN_TOOLS["execute_command"]
 
             results = []
@@ -289,42 +381,44 @@ class CLI:
         ))
 
     def _init_skills(self) -> None:
-        from subagent_demo.tools import BUILTIN_TOOLS as bt
+        skills_dir = Path("skills")
+        loaded = self.skill_registry.load_skills_from_directory(skills_dir)
+        if loaded:
+            print(f"  📦 从 skills/ 目录加载了 {len(loaded)} 个技能: {', '.join(s.name for s in loaded)}")
+        else:
+            from my_tui.tools.tools import BUILTIN_TOOLS as bt
 
-        self.skill_registry.register(Skill(
-            name="code_explorer",
-            description="代码库探索与分析",
-            tools=[bt["list_files"], bt["read_file"], bt["search_code"]],
-            metadata={"role": "explore"},
-        ))
-
-        self.skill_registry.register(Skill(
-            name="code_writer",
-            description="代码编写与修改",
-            tools=[bt["read_file"], bt["write_file"], bt["search_code"], bt["execute_command"]],
-            metadata={"role": "implementer"},
-        ))
-
-        self.skill_registry.register(Skill(
-            name="code_reviewer",
-            description="代码审查",
-            tools=[bt["read_file"], bt["search_code"], bt["execute_command"]],
-            metadata={"role": "review"},
-        ))
-
-        self.skill_registry.register(Skill(
-            name="test_runner",
-            description="测试执行与验证",
-            tools=[bt["read_file"], bt["execute_command"], bt["search_code"]],
-            metadata={"role": "verifier"},
-        ))
-
-        self.skill_registry.register(Skill(
-            name="task_planner",
-            description="任务分解与规划",
-            tools=[bt["list_files"], bt["read_file"], bt["write_file"]],
-            metadata={"role": "plan"},
-        ))
+            print("  ⚠️ skills/ 目录未找到 SKILL.md, 使用内置技能")
+            self.skill_registry.register(Skill(
+                name="code_explorer",
+                description="代码库探索与分析",
+                tools=[bt["list_files"], bt["read_file"], bt["search_code"]],
+                metadata={"role": "explore"},
+            ))
+            self.skill_registry.register(Skill(
+                name="code_writer",
+                description="代码编写与修改",
+                tools=[bt["read_file"], bt["write_file"], bt["search_code"], bt["execute_command"]],
+                metadata={"role": "implementer"},
+            ))
+            self.skill_registry.register(Skill(
+                name="code_reviewer",
+                description="代码审查",
+                tools=[bt["read_file"], bt["search_code"], bt["execute_command"]],
+                metadata={"role": "review"},
+            ))
+            self.skill_registry.register(Skill(
+                name="test_runner",
+                description="测试执行与验证",
+                tools=[bt["read_file"], bt["execute_command"], bt["search_code"]],
+                metadata={"role": "verifier"},
+            ))
+            self.skill_registry.register(Skill(
+                name="task_planner",
+                description="任务分解与规划",
+                tools=[bt["list_files"], bt["read_file"], bt["write_file"]],
+                metadata={"role": "plan"},
+            ))
 
     async def run(self) -> None:
         await self.initialize()
@@ -349,10 +443,8 @@ class CLI:
 
             if user_input.startswith("/"):
                 await self._handle_command(user_input)
-            elif self.agent_mode:
-                await self._do_chat(user_input)
             else:
-                print("请输入命令（以 / 开头），或输入 /mode 切换到 Agent 模式")
+                await self._do_chat(user_input)
 
         await self._cleanup()
 
@@ -377,11 +469,6 @@ class CLI:
         args = parts[1] if len(parts) > 1 else ""
 
         match cmd:
-            case "/chat":
-                if not args:
-                    print("用法: /chat <消息>")
-                    return
-                await self._do_chat(args)
             case "/spawn":
                 spawn_parts = args.split(maxsplit=1)
                 if len(spawn_parts) < 2:
@@ -412,6 +499,16 @@ class CLI:
                 self._list_skills()
             case "/roles":
                 self._list_roles()
+            case "/provider":
+                await self._switch_provider(args)
+            case "/model":
+                self._switch_model(args)
+            case "/cost":
+                self._show_cost()
+            case "/resume":
+                await self._resume_session(args)
+            case "/fork":
+                await self._fork_session(args)
             case "/status":
                 self._show_status()
             case "/help":
@@ -423,11 +520,25 @@ class CLI:
                 if self.agent_mode:
                     print("直接输入内容即可与 AI 对话，输入 / 开头为命令")
                 else:
-                    print("所有输入均视为命令，输入 /mode 切换回 Agent 模式")
+                    print("提示符已变为 🔧，直接输入内容可与 AI 对话，输入 / 开头为命令")
+            case "/plan":
+                self.approval_system.set_mode(PermissionMode.PLAN)
+                print("已切换到 [Plan 模式] 🔍")
+                print("  只读调查模式 — 读操作自动放行，写操作/Shell 全部阻止")
+            case "/agent":
+                self.approval_system.set_mode(PermissionMode.DEFAULT)
+                print("已切换到 [Agent 模式] 🤖")
+                print("  默认交互模式 — 每次操作都会询问确认")
+            case "/yolo":
+                self.approval_system.set_mode(PermissionMode.YOLO)
+                print("已切换到 [YOLO 模式] ⚡")
+                print("  全部自动批准（安全守卫仍生效）— 谨慎操作！")
             case "/sessions":
                 self._list_sessions()
             case "/session":
                 self._switch_session(args)
+            case "/new":
+                await self._new_session(args)
             case "/session_rename":
                 rename_parts = args.split(maxsplit=1)
                 if len(rename_parts) < 2:
@@ -503,7 +614,7 @@ class CLI:
                     print("没有需要恢复的任务")
             case "/quit":
                 self.running = False
-                print("再见! 🐋")
+                print("再见! �")
             case _:
                 print(f"未知命令: {cmd}，输入 /help 查看帮助")
 
@@ -514,13 +625,20 @@ class CLI:
         )
 
         ctx = AgentContext(
-            llm=self.llm,
-            manager=self.manager,
-            skill_registry=self.skill_registry,
-            event_bus=self.event_bus,
             agent_id=self.main_agent_id,
-            spawn_depth=0,
+            agent_name="main",
+            role_type=RoleType.GENERAL,
+            role_def=ROLE_REGISTRY[RoleType.GENERAL],
             cancel_token=self.cancel_token,
+            message_queue=asyncio.Queue(),
+            event_bus=self.event_bus,
+            llm=self.llm,
+            tools=tools,
+            skill_registry=self.skill_registry,
+            subagent_manager=self.manager,
+            conversation_manager=self.conversations,
+            approval_system=self.approval_system,
+            depth=0,
         )
         subagent_tools = _build_subagent_tools(ctx)
         all_tools = tools + subagent_tools
@@ -528,10 +646,17 @@ class CLI:
         skills = [f"{s.name} — {s.description}" for s in self.skill_registry.list_all()]
         system_prompt = prompt_engine.render_main_system(
             "general", skills=skills, cwd=str(Path.cwd()),
+            model=self.provider_config.model,
+            provider=PROVIDER_DISPLAY_NAMES.get(
+                self.provider_config.provider_type,
+                self.provider_config.provider_type.value,
+            ),
         )
 
         user_msg = HumanMessage(content=message)
         await self.conversations.add_message(user_msg)
+
+        await self.conversations.compress_context()
 
         llm_with_tools = self.llm.bind_tools(all_tools)
 
@@ -544,7 +669,7 @@ class CLI:
 
             messages = [
                 SystemMessage(content=system_prompt),
-                *self.conversations.get_context(),
+                *self.conversations.get_messages(),
             ]
 
             print("🤖 ", end="", flush=True)
@@ -571,6 +696,11 @@ class CLI:
             for c in collected_chunks[1:]:
                 response += c
 
+            input_text = "\n".join(m.content or "" for m in messages)
+            output_text = str(response.content) if response.content else ""
+            if self.token_tracker:
+                self.token_tracker.record_turn(input_text, output_text)
+
             if not response.tool_calls:
                 content = str(response.content) if response.content else "(无内容)"
                 print()
@@ -595,6 +725,34 @@ class CLI:
                 tc_id = tc.get("id", "")
 
                 print(f"  🔧 调用工具: {tc_name}")
+
+                if self.approval_system is not None:
+                    approval_result = await self.approval_system.evaluate_tool_call(
+                        name=tc_name,
+                        arguments=tc_args,
+                        command=str(tc_args.get("command", tc_args.get("filepath", ""))),
+                        target_path=str(tc_args.get("filepath", tc_args.get("directory", ""))),
+                    )
+                    if approval_result.decision == Decision.BLOCK:
+                        msg = f"工具 '{tc_name}' 被审批系统拒绝: {approval_result.message}"
+                        print(f"    ⛔ {msg}")
+                        tool_msg = ToolMessage(content=msg, tool_call_id=tc_id)
+                        await self.conversations.add_message(tool_msg)
+                        continue
+                    elif approval_result.decision == Decision.ASK:
+                        detail = _format_tool_detail(tc_name, tc_args)
+                        print(f"    ❓ {approval_result.message}")
+                        if detail:
+                            print(detail)
+                        confirm = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: input("    确认执行? [y/N]: ").strip().lower()
+                        )
+                        if confirm not in ("y", "yes"):
+                            msg = f"用户拒绝工具 '{tc_name}'"
+                            print(f"    ⛔ {msg}")
+                            tool_msg = ToolMessage(content=msg, tool_call_id=tc_id)
+                            await self.conversations.add_message(tool_msg)
+                            continue
 
                 tool = tool_name_map.get(tc_name)
                 if tool is None:
@@ -632,14 +790,20 @@ class CLI:
         tools = get_tools_by_names(role_def.allowed_tools)
 
         ctx = AgentContext(
-            llm=self.llm,
-            manager=self.manager,
-            skill_registry=self.skill_registry,
-            event_bus=self.event_bus,
             agent_id=self.main_agent_id,
+            agent_name="main",
+            role_type=role_type,
             role_def=role_def,
-            spawn_depth=0,
             cancel_token=self.cancel_token,
+            message_queue=asyncio.Queue(),
+            event_bus=self.event_bus,
+            llm=self.llm,
+            tools=tools,
+            skill_registry=self.skill_registry,
+            subagent_manager=self.manager,
+            conversation_manager=self.conversations,
+            approval_system=self.approval_system,
+            depth=0,
         )
 
         agent = await self.manager.spawn(
@@ -657,25 +821,178 @@ class CLI:
         agent.status = SubAgentStatus.RUNNING
         agent.task_handle = asyncio.create_task(
             _run_agent_loop(
-                ctx=AgentContext(
-                    llm=self.llm,
-                    manager=self.manager,
-                    skill_registry=self.skill_registry,
-                    event_bus=self.event_bus,
+                AgentContext(
                     agent_id=agent.agent_id,
+                    agent_name=agent.name,
+                    role_type=role_type,
                     role_def=role_def,
-                    spawn_depth=1,
-                    parent_id=self.main_agent_id,
                     cancel_token=agent.cancel_token,
+                    message_queue=agent.message_queue,
+                    event_bus=self.event_bus,
+                    llm=self.llm,
+                    tools=tools,
+                    skill_registry=self.skill_registry,
+                    subagent_manager=self.manager,
+                    conversation_manager=self.conversations,
+                    approval_system=self.approval_system,
+                    depth=1,
                 ),
-                agent=agent,
-                tools=tools,
-                task=task,
             )
         )
 
         print(f"✅ 子 Agent 已启动: {agent.name} [{agent.agent_id}]")
         print(f"   角色: {role_type.value} | 任务: {task[:80]}")
+
+    async def _resume_session(self, args: str) -> None:
+        if not args:
+            checkpoint = self.conversations.get_last_checkpoint()
+            if checkpoint:
+                sid = checkpoint["session_id"]
+                print(f"  发现上次断点:")
+                print(f"    会话: {checkpoint['title']}")
+                print(f"    消息数: {checkpoint['message_count']}")
+                print(f"    Token: {checkpoint['token_count']}")
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input("  恢复该会话? [Y/n]: ").strip().lower()
+                )
+                if resp in ("", "y", "yes"):
+                    self.conversations.load_session(sid)
+                    self.conversations.clear_checkpoint()
+                    info = self.conversations.get_session_info(sid)
+                    print(f"  ✅ 已恢复会话: {info.title} ({info.message_count} 条消息, {info.token_count} tokens)")
+                    return
+                print("  已跳过恢复")
+            else:
+                print("  没有可恢复的断点")
+            return
+
+        sid = args.strip()
+        if self.conversations.load_session(sid):
+            info = self.conversations.get_session_info(sid)
+            if info:
+                self.conversations.clear_checkpoint()
+                print(f"  ✅ 已恢复会话: {info.title} ({info.message_count} 条消息, {info.token_count} tokens)")
+            else:
+                print(f"  ✅ 已恢复会话 {sid[:8]}")
+        else:
+            print(f"  会话不存在: {sid}")
+            sessions = self.conversations.list_sessions(limit=5)
+            if sessions:
+                print("  最近的会话:")
+                for s in sessions:
+                    print(f"    {s.session_id[:8]} — {s.title} ({s.message_count} 条消息)")
+
+    async def _fork_session(self, args: str) -> None:
+        parts = args.split(maxsplit=1)
+        if not parts:
+            print("用法: /fork <session_id> [turn_number]")
+            print("  turn_number: 分叉到指定轮次（1 开始），不指定则复制全部")
+            return
+
+        sid = parts[0].strip()
+        turn_number = None
+        if len(parts) > 1:
+            try:
+                turn_number = int(parts[1].strip())
+                if turn_number < 1:
+                    print("  turn_number 必须 >= 1")
+                    return
+            except ValueError:
+                print(f"  turn_number 必须是数字: {parts[1]}")
+                return
+
+        source = self.conversations.get_session_info(sid)
+        if source is None:
+            print(f"  源会话不存在: {sid}")
+            return
+
+        title_suffix = f" (轮次 {turn_number})" if turn_number else " (全部)"
+        title = f"Fork: {source.title[:30]}"
+
+        new_id = self.conversations.fork_session(sid, title=title, turn_number=turn_number)
+        info = self.conversations.get_session_info(new_id)
+        msg_count = info.message_count if info else "?"
+        print(f"  ✅ 已分叉新会话: {new_id[:8]} — {title}")
+        print(f"    消息数: {msg_count}")
+        print(f"    源会话: {sid[:8]} (轮次: {turn_number or '全部'})")
+
+    async def _switch_provider(self, args: str) -> None:
+        if not args:
+            print(f"\n  当前 Provider: {get_provider_display(self.provider_config)}")
+            print(f"  Base URL: {self.provider_config.base_url}")
+            print(f"\n  可用 Provider:")
+            for p in get_available_providers():
+                print(f"    {p['key']:20s} — {p['display']}")
+            print(f"\n  用法: /provider <类型>")
+            return
+
+        provider_type = parse_provider(args.strip())
+        if provider_type is None:
+            print(f"  无效的 Provider: {args}")
+            print(f"  可选: openai_compatible, anthropic")
+            return
+
+        if provider_type == self.provider_config.provider_type:
+            print(f"  当前已经是 {PROVIDER_DISPLAY_NAMES[provider_type]}")
+            return
+
+        defaults = PROVIDER_DEFAULTS.get(provider_type.value, {})
+
+        api_key = input(f"  {PROVIDER_DISPLAY_NAMES[provider_type]} API Key: ").strip()
+        while not api_key:
+            print("  API Key 不能为空")
+            api_key = input(f"  {PROVIDER_DISPLAY_NAMES[provider_type]} API Key: ").strip()
+
+        base_url = input(f"  Base URL (默认 {defaults.get('base_url', '')}): ").strip()
+        if not base_url:
+            base_url = defaults.get("base_url", "")
+
+        model = input(f"  模型 (默认 {defaults.get('model', '')}): ").strip()
+        if not model:
+            model = defaults.get("model", "")
+
+        self.provider_config = ProviderConfig(
+            provider_type=provider_type,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+        )
+
+        self.llm = create_llm(self.provider_config)
+        if self.token_tracker:
+            self.token_tracker.model = self.provider_config.model
+        else:
+            self.token_tracker = TokenTracker(model=self.provider_config.model)
+        self._save_settings(
+            self.provider_config.base_url,
+            self.provider_config.api_key,
+            self.provider_config.model,
+            self.manager.max_concurrent,
+            self.manager.max_spawn_depth,
+            provider=self.provider_config.provider_type.value,
+        )
+        print(f"  ✅ 已切换到: {get_provider_display(self.provider_config)}\n")
+
+    def _switch_model(self, args: str) -> None:
+        if not args:
+            print(f"\n  当前模型: {self.provider_config.model}")
+            print(f"  用法: /model <模型名称>")
+            return
+
+        model = args.strip()
+        self.provider_config.model = model
+        self.llm = create_llm(self.provider_config)
+        if self.token_tracker:
+            self.token_tracker.model = model
+        self._save_settings(
+            self.provider_config.base_url,
+            self.provider_config.api_key,
+            self.provider_config.model,
+            self.manager.max_concurrent,
+            self.manager.max_spawn_depth,
+            provider=self.provider_config.provider_type.value,
+        )
+        print(f"  ✅ 模型已切换为: {model}\n")
 
     def _list_skills(self) -> None:
         skills = self.skill_registry.list_all()
@@ -684,8 +1001,7 @@ class CLI:
             return
         print("\n已注册的技能:")
         for s in skills:
-            role = s.metadata.get("role", "N/A")
-            print(f"  📦 {s.name} — {s.description} (对应角色: {role})")
+            print(f"  📦 {s.name}")
         print()
 
     def _list_roles(self) -> None:
@@ -715,6 +1031,7 @@ class CLI:
         print()
 
     def _switch_session(self, session_id: str) -> None:
+        session_id = session_id.strip("[]")
         if not session_id:
             sessions = self.conversations.list_sessions()
             if sessions:
@@ -723,6 +1040,7 @@ class CLI:
             return
 
         if self.conversations.load_session(session_id):
+            self.conversations.clear_checkpoint()
             info = self.conversations.list_sessions()
             matched = [s for s in info if s.session_id == session_id]
             if matched:
@@ -730,6 +1048,18 @@ class CLI:
                 print(f"已切换到会话: {s.title} ({s.message_count} 条消息, {s.token_count} tokens)")
         else:
             print(f"会话不存在: {session_id}")
+
+    async def _new_session(self, title: str) -> None:
+        session_id = await self.conversations.create_session(
+            model=self.provider_config.model,
+            title=title.strip() or "新对话",
+        )
+        self.conversations.clear_checkpoint()
+        info = self.conversations.list_sessions()
+        matched = [s for s in info if s.session_id == session_id]
+        if matched:
+            s = matched[0]
+            print(f"已创建并切换到新会话: {s.title} ({s.session_id[:8]})")
 
     async def _submit_task(self, raw: str) -> None:
         if not raw:
@@ -792,6 +1122,25 @@ class CLI:
             print(f"      创建: {created} | 进度: {t.progress:.0%}")
         print()
 
+    def _show_cost(self) -> None:
+        if not self.token_tracker:
+            print("\n  Token 跟踪器未初始化")
+            return
+
+        summary = self.token_tracker.summary()
+        pricing = calculate_cost(self.provider_config.model, 1000, 1000)
+
+        print(f"\nToken 用量统计:")
+        print(f"  模型: {summary['model']}")
+        print(f"  对话轮次: {summary['turns']}")
+        print(f"  输入 Tokens: {summary['total_input_tokens']:,}")
+        print(f"  输出 Tokens: {summary['total_output_tokens']:,}")
+        print(f"  总计 Tokens: {summary['total_tokens']:,}")
+        print(f"  估算成本: {summary['total_cost_str']}")
+        print(f"  (输入 ${pricing['input_rate']}/M tokens | "
+              f"输出 ${pricing['output_rate']}/M tokens)")
+        print()
+
     def _show_status(self) -> None:
         agents = self.manager.list_agents()
         running = sum(1 for a in agents if a.status == SubAgentStatus.RUNNING)
@@ -800,6 +1149,17 @@ class CLI:
         cancelled = sum(1 for a in agents if a.status == SubAgentStatus.CANCELLED)
 
         print(f"\n系统状态:")
+        mode_label = {
+            PermissionMode.DEFAULT: "Agent",
+            PermissionMode.PLAN: "Plan 🔍",
+            PermissionMode.YOLO: "YOLO ⚡",
+            PermissionMode.ACCEPT_EDITS: "AcceptEdits",
+            PermissionMode.BYPASS: "Bypass",
+            PermissionMode.AUTO: "Auto",
+        }.get(self.approval_system.context.mode, self.approval_system.context.mode.value)
+        print(f"  Provider: {get_provider_display(self.provider_config)}")
+        print(f"  审批模式: {mode_label}")
+        print(f"  Base URL: {self.provider_config.base_url}")
         print(f"  SubAgent Session: {self.manager.session_boot_id}")
         print(f"  并发上限: {self.manager.max_concurrent}")
         print(f"  深度上限: {self.manager.max_spawn_depth}")
@@ -824,6 +1184,19 @@ class CLI:
             print(f"  事件总线: 运行中")
             print()
 
+        if self.token_tracker:
+            summary = self.token_tracker.summary()
+            print(f"  Token 用量:")
+            print(f"    总计: {summary['total_tokens']:,} tokens")
+            print(f"    估算成本: {summary['total_cost_str']}")
+            print(f"    轮次: {summary['turns']}")
+            print()
+
+        checkpoint = self.conversations.get_last_checkpoint()
+        if checkpoint:
+            print(f"  断点: {checkpoint['title']} ({checkpoint['message_count']} 条消息)")
+            print()
+
         if self.task_manager:
             running = self.task_manager.running_count
             pending = self.task_manager.pending_count
@@ -843,7 +1216,36 @@ class CLI:
         if self.manager:
             await self.manager.shutdown()
         if self.conversations:
+            if self.conversations.current_session_id:
+                cpid = self.conversations.save_checkpoint()
+                if cpid:
+                    print("  💾 已保存会话断点")
             self.conversations.close()
+
+
+def _format_tool_detail(name: str, args: dict) -> str:
+    lines = []
+    target = args.get("file_path") or args.get("filepath") or args.get("directory") or args.get("path") or ""
+    if target:
+        lines.append(f"    改哪里: {target}")
+    if name in ("write_file", "edit_file", "write") and args.get("content"):
+        content = args["content"]
+        preview = content[:200].replace("\n", "\\n")
+        lines.append(f"    改什么: {preview}")
+    elif name in ("edit_file",) and args.get("new_str"):
+        preview = args["new_str"][:200].replace("\n", "\\n")
+        lines.append(f"    改什么: {preview}")
+    elif name in ("execute_command", "Bash", "shell") and args.get("command"):
+        cmd = args["command"]
+        lines.append(f"    命令: {cmd[:200]}")
+    elif name == "search_code" and args.get("query"):
+        lines.append(f"    查询: {args['query']}")
+    if not lines:
+        arg_str = json.dumps(args, ensure_ascii=False)
+        if len(arg_str) > 200:
+            arg_str = arg_str[:200] + "..."
+        lines.append(f"    参数: {arg_str}")
+    return "\n".join(lines)
 
 
 def main():
