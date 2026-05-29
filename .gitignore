@@ -7,6 +7,11 @@ build/
 *.egg
 setting.json
 
+# Env files
+.env
+.env.local
+.env.production
+
 # Runtime
 subagents.json
 *.tmp
@@ -16,6 +21,37 @@ conversations.db-wal
 tasks.db
 tasks.db-shm
 tasks.db-wal
+memory.db
+session_*
+skills-lock.json
+
+# Temporary helper scripts and generated files
+_[a-z]*
+
+# Web runtime databases
+.goat_web/
+conversations_web.db
+conversations_web.db-shm
+conversations_web.db-wal
+
+# Test databases
+test_*.db
+test_*.db-shm
+test_*.db-wal
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# TypeScript build info
+frontend/tsconfig.tsbuildinfo
+
+# Runtime binaries
+web_run
+list_files
+
+# Generated reports
+project-recon-report.md
 
 # IDE
 .vscode/
@@ -25,11 +61,15 @@ tasks.db-wal
 .trae/
 openspec/
 tips/
+.plans/
 
 # Virtual env
 venv/
 .venv/
 env/
+
+# Deprecated
+tui_legacy/
 
 # OS
 .DS_Store

@@ -5,16 +5,16 @@ import asyncio, sys
 sys.path.insert(0, '.')
 from pathlib import Path
 from textual.app import App
-from my_tui.tui.state import TUIState
-from my_tui.tui.bridge import TUIBridge
-from my_tui.core.event_bus import EventBus, EventType
-from my_tui.tui.app import TuiScreen
-from my_tui.conversation.conversation_manager import ConversationManager
-from my_tui.conversation.context_compression import CompactionConfig
-from my_tui.conversation.prompt_engine import engine as prompt_engine
-from my_tui.agent.skill_system import SkillRegistry, Skill
-from my_tui.tools.tools import BUILTIN_TOOLS
-from my_tui.provider.provider import ProviderConfig, ProviderType, PROVIDER_DISPLAY_NAMES
+from tui_legacy.tui.state import TUIState
+from tui_legacy.tui.bridge import TUIBridge
+from goat.core.event_bus import EventBus, EventType
+from tui_legacy.tui.app import TuiScreen
+from goat.conversation.conversation_manager import ConversationManager
+from goat.conversation.context_compression import CompactionConfig
+from goat.conversation.prompt_engine import engine as prompt_engine
+from goat.agent.skill_system import SkillRegistry, Skill
+from goat.tools.tools import BUILTIN_TOOLS
+from goat.provider.provider import ProviderConfig, ProviderType, PROVIDER_DISPLAY_NAMES
 from langchain_core.messages import SystemMessage, AIMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -176,7 +176,6 @@ async def test():
         print(f"  queue_size={app.user_input_queue.qsize()}")
         print(f"  msg_count={app.state.message_count}")
         print(f"  messages: {len(app.state.messages)}")
-        print(f"  version: {app.state.version}")
         print(f"  is_streaming: {app.state.is_streaming}")
         print(f"  streaming_content: {app.state.streaming_content!r}")
         

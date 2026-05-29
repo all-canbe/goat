@@ -9,6 +9,7 @@
 | Git | git_status, git_diff, git_log, git_commit |
 | Shell | execute_command |
 | Web | web_search, web_fetch |
+| 浏览器 | browser_navigate, browser_click, browser_type, browser_screenshot, browser_evaluate |
 | Agent 管理 | agent_spawn, agent_eval, agent_list, agent_collect, agent_cancel |
 
 ## 工具实现规范

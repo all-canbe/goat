@@ -3,15 +3,15 @@ import sys, asyncio, json
 from pathlib import Path
 sys.path.insert(0, '.')
 
-from my_tui.core.event_bus import EventBus, EventType
-from my_tui.tui.state import TUIState, MessageData, MessageRole
-from my_tui.tui.bridge import TUIBridge
-from my_tui.provider.provider import create_llm, ProviderConfig, ProviderType, get_provider_display, PROVIDER_DISPLAY_NAMES
-from my_tui.conversation.conversation_manager import ConversationManager
-from my_tui.conversation.context_compression import CompactionConfig
-from my_tui.conversation.prompt_engine import engine as prompt_engine
-from my_tui.agent.skill_system import SkillRegistry, Skill
-from my_tui.tools.tools import BUILTIN_TOOLS
+from goat.core.event_bus import EventBus, EventType
+from tui_legacy.tui.state import TUIState, MessageData, MessageRole
+from tui_legacy.tui.bridge import TUIBridge
+from goat.provider.provider import create_llm, ProviderConfig, ProviderType, get_provider_display, PROVIDER_DISPLAY_NAMES
+from goat.conversation.conversation_manager import ConversationManager
+from goat.conversation.context_compression import CompactionConfig
+from goat.conversation.prompt_engine import engine as prompt_engine
+from goat.agent.skill_system import SkillRegistry, Skill
+from goat.tools.tools import BUILTIN_TOOLS
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 

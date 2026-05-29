@@ -3,10 +3,10 @@ Test with actual TuiScreen from the codebase - let real handler run
 """
 import asyncio
 from textual.app import App
-from my_tui.tui.state import TUIState
-from my_tui.tui.bridge import TUIBridge
-from my_tui.core.event_bus import EventBus
-from my_tui.tui.app import TuiScreen
+from tui_legacy.tui.state import TUIState
+from tui_legacy.tui.bridge import TUIBridge
+from goat.core.event_bus import EventBus
+from tui_legacy.tui.app import TuiScreen
 
 
 class TestApp(App):

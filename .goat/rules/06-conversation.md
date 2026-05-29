@@ -23,10 +23,25 @@
 
 ## 数据流
 
+### CLI / TUI 模式
+
 ```
 用户输入 → HumanMessage → ConversationManager.add_message
   → compress_context → LLM.astream(messages)
+  → 流式 token → EventBus.LLM_STREAM → TUI/Bridge → UI
   → tool_calls → 审批 → 执行 → ToolMessage → 循环
+  → 最终响应 → EventBus.LLM_RESPONSE → ConversationManager.add_message
+```
+
+### Web 模式
+
+```
+用户输入 (HTTP POST /api/chat) → web_chat_handler.handle()
+  → HumanMessage → ConversationManager.add_message
+  → compress_context → LLM.astream(messages)
+  → 流式 token → EventBus → ws_manager.broadcast → WebSocket → React
+  → tool_calls → 审批 (approval_request 事件) → 执行 → ToolMessage → 循环
+  → 最终响应 → chat.response 事件 → WebSocket → React
 ```
 
 - 消息顺序: `SystemMessage → 历史消息 → 最新 HumanMessage`

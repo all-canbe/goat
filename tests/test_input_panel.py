@@ -3,7 +3,7 @@ Test InputPanel from the actual codebase
 """
 import asyncio
 from textual.app import App, ComposeResult
-from my_tui.tui.widgets.input_panel import InputPanel
+from tui_legacy.tui.widgets.input_panel import InputPanel
 
 
 class TestApp(App):
@@ -18,6 +18,9 @@ class TestApp(App):
 submitted_texts: list[str] = []
 
 
+from textual.widgets import Input
+
+
 class TestScreenApp(App):
     def compose(self) -> ComposeResult:
         yield InputPanel(id="test_panel")
@@ -25,9 +28,12 @@ class TestScreenApp(App):
     def on_mount(self):
         self.query_one("#test_panel", InputPanel).focus_input()
 
-    def on_input_panel_submitted(self, message: InputPanel.Submitted):
-        text = message.text
+    def on_input_submitted(self, event: Input.Submitted):
+        text = event.value.strip()
+        if not text:
+            return
         submitted_texts.append(text)
+        event.input.clear()
         print(f"  TuiScreen handler called: text={text!r}")
 
 

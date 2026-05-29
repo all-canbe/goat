@@ -2,9 +2,9 @@
 import sys, asyncio, json
 sys.path.insert(0, '.')
 
-from my_tui.provider.provider import create_llm, ProviderConfig, ProviderType
-from my_tui.conversation.conversation_manager import ConversationManager
-from my_tui.conversation.context_compression import CompactionConfig
+from goat.provider.provider import create_llm, ProviderConfig, ProviderType
+from goat.conversation.conversation_manager import ConversationManager
+from goat.conversation.context_compression import CompactionConfig
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
