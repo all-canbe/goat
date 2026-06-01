@@ -91,14 +91,9 @@ class ConversationManager:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL DEFAULT '新对话',
                 model TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                message_count INTEGER DEFAULT 0,
-                token_count INTEGER DEFAULT 0,
-                subagent_count INTEGER DEFAULT 0,
-                metadata TEXT DEFAULT '{}'
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,8 +101,6 @@ class ConversationManager:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL DEFAULT '',
                 tool_call_id TEXT,
-                tool_name TEXT,
-                metadata TEXT DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
@@ -122,6 +115,23 @@ class ConversationManager:
             );
         """)
         conn.commit()
+        self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        self._add_column_if_missing(conn, "sessions", "title", "TEXT NOT NULL DEFAULT '新对话'")
+        self._add_column_if_missing(conn, "sessions", "message_count", "INTEGER DEFAULT 0")
+        self._add_column_if_missing(conn, "sessions", "token_count", "INTEGER DEFAULT 0")
+        self._add_column_if_missing(conn, "sessions", "subagent_count", "INTEGER DEFAULT 0")
+        self._add_column_if_missing(conn, "sessions", "metadata", "TEXT DEFAULT '{}'")
+        self._add_column_if_missing(conn, "messages", "tool_name", "TEXT")
+        self._add_column_if_missing(conn, "messages", "metadata", "TEXT DEFAULT '{}'")
+        conn.commit()
+
+    @staticmethod
+    def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_def: str) -> None:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
 
     async def create_session(self, model: str = "", title: str = "新对话") -> str:
         session_id = str(uuid.uuid4())
@@ -199,6 +209,17 @@ class ConversationManager:
                     tool_call_id = tc.get("id", "")
                     break
 
+        metadata = {}
+        if isinstance(message, AIMessage) and message.tool_calls:
+            metadata["tool_calls"] = [
+                {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
+                for tc in message.tool_calls
+            ]
+        if isinstance(message, ToolMessage):
+            metadata["tool_result"] = content
+            if message.tool_call_id:
+                metadata["tool_call_id"] = message.tool_call_id
+
         conn = self._get_conn()
 
         if role == "user":
@@ -216,9 +237,10 @@ class ConversationManager:
                         (new_title, sid),
                     )
 
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
-            (sid, role, content, tool_call_id, now),
+            "INSERT INTO messages (session_id, role, content, tool_call_id, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, role, content, tool_call_id, metadata_json, now),
         )
         conn.execute(
             "UPDATE sessions SET message_count = message_count + 1, updated_at = ? WHERE session_id = ?",
@@ -301,7 +323,7 @@ class ConversationManager:
                 content=row["content"],
                 tool_call_id=row["tool_call_id"],
                 tool_name=row["tool_name"],
-                metadata={},
+                metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {}),
                 created_at=row["created_at"],
             )
             for row in rows

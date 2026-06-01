@@ -134,7 +134,7 @@ class WindowsJobSandbox(BaseSandbox):
                     shell=shell,
                 )
             except FileNotFoundError as e:
-                return SandboxResult(-1, "", f"命令未找�? {e}", sandbox_type="windows_job")
+                return SandboxResult(-1, "", f"命令未找? {e}", sandbox_type="windows_job")
             except Exception as e:
                 return SandboxResult(-1, "", f"启动失败: {e}", sandbox_type="windows_job")
 

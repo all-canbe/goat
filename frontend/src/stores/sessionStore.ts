@@ -30,6 +30,7 @@ function mapMessage(raw: any): Message {
     role: raw.role,
     content: raw.content,
     timestamp: raw.createdAt ? new Date(raw.createdAt).getTime() : Date.now(),
+    toolCalls: raw.toolCalls || undefined,
   }
 }
 
@@ -38,8 +39,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeSessionId: null,
   isLoading: false,
 
-  setActiveSession: (id) => {
+  setActiveSession: async (id) => {
     set({ activeSessionId: id })
+    useChatStore.getState().setActiveSessionId(id)
+    await get().loadSessionMessages(id)
   },
 
   createSession: async () => {
@@ -49,6 +52,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const newId = data.session_id || data.sessionId
     if (newId) {
       set({ activeSessionId: newId })
+      useChatStore.getState().setActiveSessionId(newId)
       await get().loadSessionMessages(newId)
     }
   },
@@ -60,7 +64,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const isDeletingActive = activeSessionId === id
     const nextId = isDeletingActive ? (remaining[0]?.id ?? null) : activeSessionId
     set({ sessions: remaining, activeSessionId: nextId })
+    useChatStore.getState().setActiveSessionId(nextId)
     useChatStore.getState().removeSession(id)
+    if (nextId) {
+      await get().loadSessionMessages(nextId)
+    }
   },
 
   loadSessions: async () => {
@@ -69,7 +77,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const res = await fetch('/api/sessions')
       const data = await res.json()
       const sessions = (data.sessions || []).map(mapSession)
+      const { activeSessionId } = get()
       set({ sessions, isLoading: false })
+      if (!activeSessionId && sessions.length > 0) {
+        await get().setActiveSession(sessions[0].id)
+      }
     } catch {
       set({ isLoading: false })
     }

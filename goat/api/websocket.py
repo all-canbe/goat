@@ -59,7 +59,7 @@ class WSManager:
         if msg_type == "chat.send":
             await self._handle_chat_send(payload)
         elif msg_type == "chat.cancel":
-            await self._handle_chat_cancel(session_id)
+            await self._handle_chat_cancel(payload)
         elif msg_type == "tool.approve":
             await self._handle_tool_approve(payload)
         elif msg_type == "tool.reject":
@@ -83,15 +83,26 @@ class WSManager:
         else:
             logger.error("No session_manager set, cannot process chat.send")
 
-    async def _handle_chat_cancel(self, session_id: str) -> None:
+    async def _handle_chat_cancel(self, payload: dict) -> None:
+        session_id = payload.get("sessionId", "default")
         if self._session_manager:
             await self._session_manager.cancel_session(session_id)
 
     async def _handle_tool_approve(self, payload: dict) -> None:
-        pass
+        session_id = payload.get("sessionId", "default")
+        if self._session_manager and hasattr(self._session_manager, '_engines'):
+            engine = self._session_manager._engines.get(session_id)
+            if engine and hasattr(engine, 'submit_approval'):
+                engine.submit_approval("approved")
+        logger.info("Tool approved for session %s", session_id[:8])
 
     async def _handle_tool_reject(self, payload: dict) -> None:
-        pass
+        session_id = payload.get("sessionId", "default")
+        if self._session_manager and hasattr(self._session_manager, '_engines'):
+            engine = self._session_manager._engines.get(session_id)
+            if engine and hasattr(engine, 'submit_approval'):
+                engine.submit_approval("rejected")
+        logger.info("Tool rejected for session %s", session_id[:8])
 
     async def _handle_mode_change(self, payload: dict) -> None:
         mode = payload.get("mode", "agent")
@@ -118,6 +129,8 @@ class WSManager:
         answer = payload.get("answer", "")
         question_id = payload.get("questionId", "")
         logger.info("Ask user answer: %s -> %s", question_id, answer[:100])
+        from goat.tools.ask_user_tool import submit_user_answer
+        submit_user_answer(answer)
 
 
 ws_manager = WSManager()
@@ -143,9 +156,7 @@ class EventBusBridge:
             event = await queue.get()
             msg = self._translate(event)
             if msg:
-                sid = event.session_id or self._session_id
-                if sid:
-                    await ws_manager.broadcast_to_session(sid, msg)
+                await ws_manager.broadcast_to_all(msg)
 
     def _translate(self, event: SubagentEvent) -> dict[str, Any] | None:
         sid = event.session_id or self._session_id

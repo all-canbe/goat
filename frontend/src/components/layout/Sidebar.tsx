@@ -17,8 +17,8 @@ export default function Sidebar() {
   const [treeExpanded, setTreeExpanded] = useState(false)
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
 
-  const fetchTree = () => {
-    const root = workspace || '.'
+  const fetchTree = (path?: string) => {
+    const root = path ?? workspace ?? '.'
     fetch(`/api/files/tree?path=${encodeURIComponent(root)}`)
       .then((r) => r.json())
       .then((d) => setTree(d.tree || []))

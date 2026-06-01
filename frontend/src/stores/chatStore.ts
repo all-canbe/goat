@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Message, PendingApproval, PendingQuestion } from '@/types'
+import type { Message, PendingApproval, PendingQuestion, ToolCall } from '@/types'
 
 interface SessionChatState {
   messages: Message[]
@@ -7,19 +7,27 @@ interface SessionChatState {
   isStreaming: boolean
   pendingApproval: PendingApproval | null
   pendingQuestion: PendingQuestion | null
+  pendingToolCalls: ToolCall[]
+}
+
+function getInitialState(): SessionChatState {
+  return {
+    messages: [],
+    streamingContent: '',
+    isStreaming: false,
+    pendingApproval: null,
+    pendingQuestion: null,
+    pendingToolCalls: [],
+  }
 }
 
 function ensureState(state: Record<string, SessionChatState>, sid: string): SessionChatState {
-  if (!state[sid]) {
-    state[sid] = {
-      messages: [],
-      streamingContent: '',
-      isStreaming: false,
-      pendingApproval: null,
-      pendingQuestion: null,
-    }
+  const existing = state[sid]
+  if (!existing) {
+    state[sid] = getInitialState()
+    return state[sid]
   }
-  return state[sid]
+  return existing
 }
 
 interface ChatStore {
@@ -27,6 +35,7 @@ interface ChatStore {
   activeSessionId: string | null
 
   getActiveState: () => SessionChatState | undefined
+  setActiveSessionId: (id: string | null) => void
   ensureSession: (sessionId: string) => SessionChatState
 
   addMessage: (sessionId: string, msg: Message) => void
@@ -38,6 +47,8 @@ interface ChatStore {
 
   setPendingApproval: (sessionId: string, approval: PendingApproval | null) => void
   setPendingQuestion: (sessionId: string, question: PendingQuestion | null) => void
+  addToolCall: (sessionId: string, toolCall: ToolCall) => void
+  clearToolCalls: (sessionId: string) => void
 
   searchQuery: string
   searchResults: number[]
@@ -58,18 +69,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return activeSessionId ? sessions[activeSessionId] : undefined
   },
 
+  setActiveSessionId: (id) => set({ activeSessionId: id }),
+
   ensureSession: (sessionId) => {
     const { sessions } = get()
     const updated = { ...sessions }
-    const state = ensureState(updated, sessionId)
+    ensureState(updated, sessionId)
     set({ sessions: updated })
-    return state
+    return updated[sessionId]
   },
 
   addMessage: (sessionId, msg) =>
     set((state) => {
       const updated = { ...state.sessions }
-      ensureState(updated, sessionId).messages = [...updated[sessionId].messages, msg]
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, messages: [...s.messages, msg] }
       return { sessions: updated }
     }),
 
@@ -77,34 +91,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => {
       const updated = { ...state.sessions }
       const s = ensureState(updated, sessionId)
-      s.streamingContent += token
-      s.isStreaming = true
+      updated[sessionId] = { ...s, streamingContent: s.streamingContent + token, isStreaming: true }
       return { sessions: updated }
     }),
 
   commitStream: (sessionId, messageId) => {
     const { sessions } = get()
     const s = sessions[sessionId]
-    if (!s || !s.streamingContent) return
+    if (!s || (!s.streamingContent && !s.isStreaming)) return
+    const content = s.streamingContent || '(空回复)'
+    const toolCalls = s.pendingToolCalls.length > 0 ? s.pendingToolCalls : undefined
     const msg: Message = {
       id: messageId || crypto.randomUUID(),
       role: 'assistant',
-      content: s.streamingContent,
+      content,
+      toolCalls,
       timestamp: Date.now(),
     }
-    const updated = { ...sessions }
-    const us = ensureState(updated, sessionId)
-    us.messages = [...us.messages, msg]
-    us.streamingContent = ''
-    us.isStreaming = false
-    set({ sessions: updated })
+    set((state) => {
+      const updated = { ...state.sessions }
+      updated[sessionId] = {
+        messages: [...(updated[sessionId]?.messages ?? []), msg],
+        streamingContent: '',
+        isStreaming: false,
+        pendingApproval: null,
+        pendingQuestion: null,
+        pendingToolCalls: [],
+      }
+      return { sessions: updated }
+    })
   },
 
   clearStream: (sessionId) =>
     set((state) => {
       const updated = { ...state.sessions }
-      if (updated[sessionId]) {
-        updated[sessionId] = { ...updated[sessionId], streamingContent: '', isStreaming: false }
+      const s = updated[sessionId]
+      if (s) {
+        updated[sessionId] = { ...s, streamingContent: '', isStreaming: false }
       }
       return { sessions: updated }
     }),
@@ -112,13 +135,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearSession: (sessionId) =>
     set((state) => {
       const updated = { ...state.sessions }
-      updated[sessionId] = {
-        messages: [],
-        streamingContent: '',
-        isStreaming: false,
-        pendingApproval: null,
-        pendingQuestion: null,
-      }
+      updated[sessionId] = getInitialState()
       return { sessions: updated }
     }),
 
@@ -132,14 +149,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setPendingApproval: (sessionId, approval) =>
     set((state) => {
       const updated = { ...state.sessions }
-      ensureState(updated, sessionId).pendingApproval = approval
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingApproval: approval }
       return { sessions: updated }
     }),
 
   setPendingQuestion: (sessionId, question) =>
     set((state) => {
       const updated = { ...state.sessions }
-      ensureState(updated, sessionId).pendingQuestion = question
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingQuestion: question }
+      return { sessions: updated }
+    }),
+
+  addToolCall: (sessionId, toolCall) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingToolCalls: [...s.pendingToolCalls, toolCall] }
+      return { sessions: updated }
+    }),
+
+  clearToolCalls: (sessionId) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingToolCalls: [] }
       return { sessions: updated }
     }),
 

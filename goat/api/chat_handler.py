@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -9,8 +10,9 @@ from langchain_openai import ChatOpenAI
 
 from goat.conversation.conversation_manager import ConversationManager
 from goat.conversation.context_compression import CompactionConfig
-from goat.core.event_bus import EventBus
-from goat.core.workspace import get_goat_home
+from goat.core.event_bus import EventBus, EventType
+from goat.core.workspace import get_goat_home, get_skills_dir
+from goat.agent.skill_system import SkillRegistry
 from goat.provider.provider import (
     ProviderConfig, ProviderType, create_llm, parse_provider,
     get_provider_display,
@@ -49,6 +51,29 @@ def _load_settings() -> dict | None:
     return None
 
 
+def _save_settings(settings: dict) -> None:
+    try:
+        existing = {}
+        if SETTINGS_FILE.exists():
+            existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        existing.update(settings)
+        SETTINGS_FILE.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("保存 setting.json 失败: %s", e)
+
+
+def _load_settings_safe() -> dict:
+    try:
+        if SETTINGS_FILE.exists():
+            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
 class SessionManager:
     def __init__(self):
         self._engines: dict[str, SessionEngine] = {}
@@ -58,10 +83,19 @@ class SessionManager:
         self.provider_config: ProviderConfig | None = None
         self.workspace: Path = Path.cwd().resolve()
         self._initialized = False
+        self._current_mode: PermissionMode | None = None
+        self.skill_registry = SkillRegistry()
 
     async def initialize(self, workspace: str | None = None) -> None:
         if workspace:
             self.workspace = Path(workspace).resolve()
+        else:
+            settings = _load_settings_safe()
+            saved = settings.get("workspace", "")
+            if saved:
+                p = Path(saved).resolve()
+                if p.is_dir():
+                    self.workspace = p
         settings = _load_settings()
         if not settings:
             logger.error("未找到配置文件 %s，请先运行 goat cli 完成初始化", SETTINGS_FILE)
@@ -92,11 +126,21 @@ class SessionManager:
             ),
         )
 
+        skills_dir = get_skills_dir()
+        if skills_dir.exists():
+            self.skill_registry.load_skills_from_directory(skills_dir)
+            loaded = self.skill_registry.list_all()
+            if loaded:
+                logger.info("加载了 %d 个技能: %s", len(loaded), [s.name for s in loaded])
+
         from goat.tools.retry import init_retry
         init_retry(self.event_bus)
 
         self._initialized = True
         logger.info("SessionManager 初始化完成 %s", get_provider_display(self.provider_config))
+
+        from goat.tools.ask_user_tool import set_external_queue
+        set_external_queue(asyncio.Queue())
 
     def set_workspace(self, path: str) -> tuple[bool, str]:
         p = Path(path).resolve()
@@ -105,9 +149,14 @@ class SessionManager:
         if not p.is_dir():
             return False, f"路径不是目录: {path}"
         self.workspace = p
+        _save_settings({"workspace": str(p)})
+        for engine in self._engines.values():
+            engine.close()
+        self._engines.clear()
         return True, str(self.workspace)
 
     def set_mode(self, mode: PermissionMode) -> None:
+        self._current_mode = mode
         for engine in self._engines.values():
             if engine.approval_system:
                 engine.approval_system.set_mode(mode)
@@ -120,6 +169,11 @@ class SessionManager:
         engine = await self._get_or_create_engine(session_id)
         if engine.is_running:
             logger.warning("Session %s 已有运行中的 Agent", session_id[:8])
+            self.event_bus.publish_nowait(
+                "system", EventType.ERROR,
+                "已有运行中的任务，请等待完成或取消后重试",
+                agent_name="system", session_id=session_id,
+            )
             return
         await engine.start(text)
 
@@ -136,8 +190,11 @@ class SessionManager:
                 provider_config=self.provider_config,
                 workspace=self.workspace,
                 db_path=_get_db_path(),
+                skill_registry=self.skill_registry,
             )
             await engine.initialize()
+            if self._current_mode and engine.approval_system:
+                engine.approval_system.set_mode(self._current_mode)
             self._engines[session_id] = engine
         return self._engines[session_id]
 

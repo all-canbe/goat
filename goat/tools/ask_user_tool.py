@@ -22,7 +22,7 @@ class AskUserInput(BaseModel):
     question: str = Field(description="要向用户提出的问题，应清晰具体")
     options: str = Field(
         default="",
-        description="可选的快捷选项列表，用 | 分隔，如 '�?| �?| 取消'",
+        description="可选的快捷选项列表，用 | 分隔，如 '?| ?| 取消'",
     )
 
 
@@ -46,7 +46,7 @@ class AskUserTool(BaseTool):
     name: str = "ask_user"
     description: str = (
         "向用户提出一个问题并等待回答。当需要用户做决策、提供信息、确认操作时使用。\n"
-        "典型用法: '确认是否执行此操作？' �?'请提供配置信�? �?'你想怎么处理�?\n"
+        "典型用法: '确认是否执行此操作' ?'请提供配置信? ?'你想怎么处理?\n"
         "可选提供选项列表（用 | 分隔），让用户从预设选项中选择。"
     )
     args_schema: Type[BaseModel] = AskUserInput
@@ -132,7 +132,7 @@ class AskUserTool(BaseTool):
         prompt = f"\n[用户提问] {question}"
         if opts:
             prompt += f"\n  选项: {', '.join(opts)}"
-        prompt += "\n请输入回�? "
+        prompt += "\n请输入回? "
         return prompt
 
 

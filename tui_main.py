@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Goat TUI 入口 �?山羊主题的终�?AI 编程助手
+Goat TUI 入口 - 山羊主题的终端 AI 编程助手
 
 用法:
     # 运行 TUI
     goat_tui
-    # �?    python tui_main.py [--provider openai_compatible] [--model gpt-4o]
+    # 或    python tui_main.py [--provider openai_compatible] [--model gpt-4o]
 
 环境变量:
     API_KEY, BASE_URL, MODEL
@@ -241,7 +241,7 @@ async def _process_input_loop(
 
         # 命令处理：以 / 开头且非纯空格
         if text.strip().startswith("/"):
-            # /skills find<描述> �?/skills find <描述> �?构�?Prompt 注入正常 LLM 消息�?            find_query: str | None = None
+            # /skills find<描述> ?/skills find <描述> ?构?Prompt 注入正常 LLM 消息?            find_query: str | None = None
             parts = text.strip().split(maxsplit=1)
             if len(parts) >= 2 and parts[0] == "/skills":
                 after_skills = parts[1].strip()
@@ -249,9 +249,9 @@ async def _process_input_loop(
                     find_query = after_skills[4:].lstrip()
             if find_query:
                 text = (
-                    f"请使�?find-skills skill 搜索与「{find_query}」相关的可用 skill。\n"
+                    f"请使?find-skills skill 搜索与「{find_query}」相关的可用 skill。\n"
                     f"如果 find-skills skill 不可用，请通过 WebSearch 搜索 npx skills 仓库。\n"
-                    f"请清晰地列出找到的每�?skill 的：名称、描述、安�?URL。\n"
+                    f"请清晰地列出找到的每?skill 的：名称、描述、安?URL。\n"
                     f"搜索完毕后我会告知你安装选项。"
                 )
                 try:
@@ -298,7 +298,7 @@ async def _process_input_loop(
 
                 # ── 交互式安装选择 ──
                 event_bus.publish_nowait("system", EventType.MESSAGE,
-                    "\n📋 以上是搜索结果。输�?skill URL 进行安装（从上方列表复制），或输�?0 取消:")
+                    "\n📋 以上是搜索结果。输?skill URL 进行安装（从上方列表复制），或输?0 取消:")
                 try:
                     choice = await asyncio.wait_for(user_input_queue.get(), timeout=120.0)
                 except asyncio.TimeoutError:
@@ -306,7 +306,7 @@ async def _process_input_loop(
                 choice = choice.strip()
                 if choice and choice != "0":
                     event_bus.publish_nowait("system", EventType.MESSAGE,
-                        "安装�? (1) 本项�? (2) 全局? [默认 1]")
+                        "安装? (1) 本项? (2) 全局? [默认 1]")
                     try:
                         scope = await asyncio.wait_for(user_input_queue.get(), timeout=30.0)
                     except asyncio.TimeoutError:
@@ -409,7 +409,7 @@ async def _handle_cli_command(
         lines = ["会话列表:"]
         for s in sessions:
             marker = " ◀" if s.session_id == current else ""
-            lines.append(f"  {s.session_id[:8]} | {s.title} ({s.message_count} 条消�?{marker}")
+            lines.append(f"  {s.session_id[:8]} | {s.title} ({s.message_count} 条消?{marker}")
         event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
 
     elif base == "/new":
@@ -430,7 +430,7 @@ async def _handle_cli_command(
                     "用法: /skills find <描述>\n"
                     "搜索可用 skill 并展示结果供你选择安装")
                 return
-            # /skills find 已在 _process_input_loop 中被拦截并转�?Agent Prompt
+            # /skills find 已在 _process_input_loop 中被拦截并转?Agent Prompt
             event_bus.publish_nowait("system", EventType.MESSAGE,
                 f"🔍 正在搜索 skill: {query}，请等待 Agent 响应...")
 
@@ -449,7 +449,7 @@ async def _handle_cli_command(
             npx = shutil.which("npx")
             if not npx:
                 event_bus.publish_nowait("system", EventType.MESSAGE,
-                    "�?未找�?npx，请先安�?Node.js (https://nodejs.org)")
+                    "?未找?npx，请先安?Node.js (https://nodejs.org)")
                 return
             cmd = f"npx skills add {' '.join(install_parts)}"
             event_bus.publish_nowait("system", EventType.MESSAGE, f"📦 执行: {cmd}")
@@ -472,36 +472,36 @@ async def _handle_cli_command(
                         f"✅安装成功 ({scope})\n{out}\n当前技能 {', '.join(loaded_names) if loaded_names else '无'}")
                 else:
                     event_bus.publish_nowait("system", EventType.MESSAGE,
-                        f"�?安装失败 (exit {proc.returncode})\n{err or out}")
+                        f"?安装失败 (exit {proc.returncode})\n{err or out}")
             except asyncio.TimeoutError:
                 try:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-                event_bus.publish_nowait("system", EventType.MESSAGE, "�?安装超时 (120s)")
+                event_bus.publish_nowait("system", EventType.MESSAGE, "?安装超时 (120s)")
             except Exception as e:
                 try:
                     proc.kill()
                 except (ProcessLookupError, UnboundLocalError):
                     pass
-                event_bus.publish_nowait("system", EventType.MESSAGE, f"�?安装出错: {e}")
+                event_bus.publish_nowait("system", EventType.MESSAGE, f"?安装出错: {e}")
 
         elif subcmd == "list" or not subcmd:
             skills = skill_registry.list_all()
             if not skills:
                 event_bus.publish_nowait("system", EventType.MESSAGE,
-                    "暂无已注册技能\n\n安装技�?\n"
+                    "暂无已注册技能\n\n安装技?\n"
                     "  /skills install <repo_url> [--skill <name>] [--global]\n"
-                    "搜索技�?\n"
+                    "搜索技?\n"
                     "  /skills find <描述>")
                 return
-            lines = ["已注册技�?"]
+            lines = ["已注册技?"]
             for s in skills:
                 detail = s.description or "无描述"
                 if s.metadata.get("has_agents"):
                     agent_list = ", ".join(s.agents.keys())
-                    detail += f" (子角�? {agent_list})"
-                lines.append(f"  📦 {s.name} �?{detail}")
+                    detail += f" (子角? {agent_list})"
+                lines.append(f"  📦 {s.name} ?{detail}")
             lines.append("\n/skills find <描述> — 搜索新技能")
             lines.append("/skills install <url> [--skill <名称>] [--global] — 安装技能")
             event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
@@ -517,7 +517,7 @@ async def _handle_cli_command(
         lines = [
             f"Token 输入: {u['total_input_tokens']}",
             f"Token 输出: {u['total_output_tokens']}",
-            f"总成�? ${u['total_cost']:.6f}",
+            f"总成? ${u['total_cost']:.6f}",
         ]
         event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
 
@@ -526,9 +526,9 @@ async def _handle_cli_command(
         if not subs:
             event_bus.publish_nowait("system", EventType.MESSAGE, "无活跃子 Agent")
             return
-        lines = ["�?Agent:"]
+        lines = ["?Agent:"]
         for s in subs:
-            lines.append(f"  {s.agent_id} �?{s.name} ({s.status})")
+            lines.append(f"  {s.agent_id} ?{s.name} ({s.status})")
         event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
 
     elif base == "/task_list":
@@ -536,7 +536,7 @@ async def _handle_cli_command(
         if not tasks:
             event_bus.publish_nowait("system", EventType.MESSAGE, "无后台任务")
             return
-        lines = ["后台任务:"] + [f"  {t.task_id} �?{t.name} ({t.status})" for t in tasks]
+        lines = ["后台任务:"] + [f"  {t.task_id} ?{t.name} ({t.status})" for t in tasks]
         event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
 
     elif base == "/provider":
@@ -548,9 +548,9 @@ async def _handle_cli_command(
             "可用 Provider:",
         ]
         for p in get_available_providers():
-            lines.append(f"  {p['key']:20s} �?{p['display']}")
+            lines.append(f"  {p['key']:20s} ?{p['display']}")
         lines.append("")
-        lines.append("切换 Provider 请使�? /model add <名称> <url> <key>")
+        lines.append("切换 Provider 请使? /model add <名称> <url> <key>")
         event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
 
     elif base == "/model":
@@ -561,22 +561,22 @@ async def _handle_cli_command(
             rv_config = model_router.router_config.review_provider
             config_lines = [
                 f"📋 当前模型配置:\n",
-                f"  �?Agent:  {provider_config.model}",
-                f"  �?Agent:  {model_router.router_config.sub_model}",
+                f"  ?Agent:  {provider_config.model}",
+                f"  ?Agent:  {model_router.router_config.sub_model}",
             ]
             rv_model = model_router.router_config.review_model or provider_config.model
             rv_info = f"{rv_model} (独立 Provider)" if rv_config else rv_model
             config_lines.append(f"  审查模型:  {rv_info}")
             config_lines.append(f"\n用法:")
-            config_lines.append(f"  /model main <模型�?     切换�?Agent 模型")
-            config_lines.append(f"  /model sub <模型�?      切换�?Agent 模型")
-            config_lines.append(f"  /model review <模型�?   切换审查模型")
-            config_lines.append(f"  /model add <�? <url> <key>  新增自定�?Provider")
+            config_lines.append(f"  /model main <模型?     切换?Agent 模型")
+            config_lines.append(f"  /model sub <模型?      切换?Agent 模型")
+            config_lines.append(f"  /model review <模型?   切换审查模型")
+            config_lines.append(f"  /model add <? <url> <key>  新增自定?Provider")
             event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(config_lines))
 
         elif sub_cmd == "main" and len(parts) >= 2:
             new_model = parts[1]
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"�?正在测试模型 {new_model} 连通�?..")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"?正在测试模型 {new_model} 连通?..")
             test_config = ProviderConfig(
                 provider_type=provider_config.provider_type,
                 base_url=provider_config.base_url,
@@ -585,7 +585,7 @@ async def _handle_cli_command(
             )
             ok, err = await _test_llm_connection(test_config)
             if not ok:
-                event_bus.publish_nowait("system", EventType.ERROR, f"�?模型 {new_model} 连通性测试失�? {err}")
+                event_bus.publish_nowait("system", EventType.ERROR, f"?模型 {new_model} 连通性测试失? {err}")
                 return
             provider_config.model = new_model
             new_llm = create_llm(provider_config)
@@ -595,7 +595,7 @@ async def _handle_cli_command(
                            sub_model=model_router.router_config.sub_model,
                            review_model=model_router.router_config.review_model,
                            review_config=model_router.router_config.review_provider)
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"�?�?Agent 模型已切换为: {new_model}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"??Agent 模型已切换为: {new_model}")
             return new_llm
 
         elif sub_cmd == "sub" and len(parts) >= 2:
@@ -605,7 +605,7 @@ async def _handle_cli_command(
                            sub_model=new_sub,
                            review_model=model_router.router_config.review_model,
                            review_config=model_router.router_config.review_provider)
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"�?�?Agent 模型已切换为: {new_sub}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"??Agent 模型已切换为: {new_sub}")
 
         elif sub_cmd == "review" and len(parts) >= 2:
             new_review = parts[1]
@@ -615,17 +615,17 @@ async def _handle_cli_command(
                            sub_model=model_router.router_config.sub_model,
                            review_model=new_review,
                            review_config=None)
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"�?审查模型已切换为: {new_review}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"?审查模型已切换为: {new_review}")
 
         elif sub_cmd == "add" and len(parts) >= 4:
             provider_name = parts[1]
             custom_url = parts[2]
             custom_key = parts[3]
-            custom_model = input(f"  输入 {provider_name} 的模型名�? ").strip()
+            custom_model = input(f"  输入 {provider_name} 的模型名? ").strip()
             if not custom_model:
                 event_bus.publish_nowait("system", EventType.MESSAGE, "⚠️ 模型名称不能为空")
                 return
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"�?正在测试 Provider [{provider_name}] 连通�?..")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"?正在测试 Provider [{provider_name}] 连通?..")
             test_config = ProviderConfig(
                 provider_type=ProviderType.OPENAI_COMPATIBLE,
                 base_url=custom_url,
@@ -634,7 +634,7 @@ async def _handle_cli_command(
             )
             ok, err = await _test_llm_connection(test_config)
             if not ok:
-                event_bus.publish_nowait("system", EventType.ERROR, f"�?Provider [{provider_name}] 连通性测试失�? {err}")
+                event_bus.publish_nowait("system", EventType.ERROR, f"?Provider [{provider_name}] 连通性测试失? {err}")
                 return
             provider_config.model = custom_model
             provider_config.base_url = custom_url
@@ -648,7 +648,7 @@ async def _handle_cli_command(
                            review_config=model_router.router_config.review_provider,
                            custom_name=provider_name)
             event_bus.publish_nowait("system", EventType.MESSAGE,
-                                     f"�?已新�?Provider [{provider_name}] 并切换为�?Agent 模型\n"
+                                     f"?已新?Provider [{provider_name}] 并切换为?Agent 模型\n"
                                      f"   URL: {custom_url}\n   模型: {custom_model}")
             return new_llm
 
@@ -658,13 +658,13 @@ async def _handle_cli_command(
 
     elif base == "/search":
         if not rest:
-            event_bus.publish_nowait("system", EventType.MESSAGE, "用法: /search <关键�?")
+            event_bus.publish_nowait("system", EventType.MESSAGE, "用法: /search <关键?")
             return
         results = conversations.search_messages(rest)
         if not results:
             event_bus.publish_nowait("system", EventType.MESSAGE, "未找到匹配消息")
             return
-        lines = [f"找到 {len(results)} 条匹配消�?"]
+        lines = [f"找到 {len(results)} 条匹配消?"]
         for r in results[:10]:
             preview = r.content[:100].replace("\n", " ")
             lines.append(f"  [{r.session_id[:8]}] {r.role}: {preview}")
@@ -687,22 +687,22 @@ async def _handle_cli_command(
             event_bus.publish_nowait("system", EventType.MESSAGE,
                                      f"已切换到会话: {info.title if info else sid[:8]}")
         else:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会�? {rest}（多个匹配或不存在）")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会? {rest}（多个匹配或不存在）")
 
     elif base == "/session_rename":
         parts = rest.split(maxsplit=1)
         if len(parts) < 2:
-            event_bus.publish_nowait("system", EventType.MESSAGE, "用法: /session_rename <session_id> <新名�?")
+            event_bus.publish_nowait("system", EventType.MESSAGE, "用法: /session_rename <session_id> <新名?")
             return
         sid = conversations.resolve_session_id(parts[0])
         if not sid:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会�? {parts[0]}（多个匹配或不存在）")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会? {parts[0]}（多个匹配或不存在）")
             return
         ok = conversations.rename_session(sid, parts[1])
         if ok:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"会话 {sid[:8]} 已重命名�? {parts[1]}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"会话 {sid[:8]} 已重命名? {parts[1]}")
         else:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"重命名失�? {sid[:8]}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"重命名失? {sid[:8]}")
 
     elif base == "/session_delete":
         if not rest:
@@ -710,11 +710,11 @@ async def _handle_cli_command(
             return
         sid = conversations.resolve_session_id(rest)
         if not sid:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会�? {rest}（多个匹配或不存在）")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会? {rest}（多个匹配或不存在）")
             return
         ok = conversations.delete_session(sid)
         if ok:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"已删除会�?{sid[:8]}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"已删除会?{sid[:8]}")
         else:
             event_bus.publish_nowait("system", EventType.MESSAGE, f"删除失败: {sid[:8]}")
 
@@ -740,7 +740,7 @@ async def _handle_cli_command(
             event_bus.publish_nowait("system", EventType.MESSAGE, f"已导出到 {filepath}")
         else:
             if len(result) > 2000:
-                event_bus.publish_nowait("system", EventType.MESSAGE, result[:2000] + f"\n... (�?{len(result)} 字符)")
+                event_bus.publish_nowait("system", EventType.MESSAGE, result[:2000] + f"\n... (?{len(result)} 字符)")
             else:
                 event_bus.publish_nowait("system", EventType.MESSAGE, result)
 
@@ -756,7 +756,7 @@ async def _handle_cli_command(
             role_type = RoleType(role_name)
         except ValueError:
             valid = [r.value for r in RoleType]
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"无效的角�?'{role_name}'，可�? {valid}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"无效的角?'{role_name}'，可? {valid}")
             return
         child_llm = model_router.get_llm_for_role(role_name)
         from goat.agent.subagent_runtime import run_subagent
@@ -799,7 +799,7 @@ async def _handle_cli_command(
             event_bus.publish_nowait("system", EventType.MESSAGE, "用法: /cancel <agent_id>")
             return
         await manager.cancel(rest.strip())
-        event_bus.publish_nowait("system", EventType.MESSAGE, f"已取�?Agent {rest.strip()}")
+        event_bus.publish_nowait("system", EventType.MESSAGE, f"已取?Agent {rest.strip()}")
 
     elif base == "/eval":
         parts = rest.split(maxsplit=1)
@@ -812,7 +812,7 @@ async def _handle_cli_command(
     elif base == "/task":
         if not rest:
             event_bus.publish_nowait("system", EventType.MESSAGE,
-                "用法: /task <任务�? [描述] [metadata:{...}]\n可用任务类型: explore, batch_run")
+                "用法: /task <任务? [描述] [metadata:{...}]\n可用任务类型: explore, batch_run")
             return
         parts = rest.split(maxsplit=1)
         task_name = parts[0].strip()
@@ -834,7 +834,7 @@ async def _handle_cli_command(
             event_bus.publish_nowait("system", EventType.MESSAGE, f"提交失败: {err}")
         else:
             event_bus.publish_nowait("system", EventType.MESSAGE,
-                f"�?任务已提�? {task_id}\n   名称: {task_name} | 描述: {description[:60]}")
+                f"?任务已提? {task_id}\n   名称: {task_name} | 描述: {description[:60]}")
 
     elif base == "/task_cancel":
         if not rest:
@@ -860,9 +860,9 @@ async def _handle_cli_command(
     elif base == "/task_recover":
         recovered = await task_manager.recover()
         if recovered:
-            lines = [f"已恢�?{len(recovered)} 个任�?"]
+            lines = [f"已恢?{len(recovered)} 个任?"]
             for r in recovered:
-                lines.append(f"  {r.task_id} �?{r.name}: {r.description[:50] if hasattr(r, 'description') else ''}")
+                lines.append(f"  {r.task_id} ?{r.name}: {r.description[:50] if hasattr(r, 'description') else ''}")
             event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
         else:
             event_bus.publish_nowait("system", EventType.MESSAGE, "没有需要恢复的任务")
@@ -875,7 +875,7 @@ async def _handle_cli_command(
                 lines = [
                     f"发现上次断点:",
                     f"  会话: {checkpoint['title']}",
-                    f"  消息�? {checkpoint['message_count']}",
+                    f"  消息? {checkpoint['message_count']}",
                     f"  Token: {checkpoint['token_count']}",
                     "使用 /resume <session_id> 指定要恢复的会话",
                 ]
@@ -883,14 +883,14 @@ async def _handle_cli_command(
                     lines.append("")
                     lines.append("最近的会话:")
                     for s in sessions:
-                        lines.append(f"  {s.session_id[:8]} �?{s.title} ({s.message_count} 条消�?")
+                        lines.append(f"  {s.session_id[:8]} ?{s.title} ({s.message_count} 条消?")
                 event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
             else:
                 sessions = conversations.list_sessions(limit=5)
                 if sessions:
                     lines = ["没有可恢复的断点，最近的会话:"]
                     for s in sessions:
-                        lines.append(f"  {s.session_id[:8]} �?{s.title} ({s.message_count} 条消�?")
+                        lines.append(f"  {s.session_id[:8]} ?{s.title} ({s.message_count} 条消?")
                     event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
                 else:
                     event_bus.publish_nowait("system", EventType.MESSAGE, "没有会话可恢复")
@@ -898,11 +898,11 @@ async def _handle_cli_command(
         sid = conversations.resolve_session_id(rest.strip())
         if not sid:
             sessions = conversations.list_sessions(limit=5)
-            lines = [f"未找到会�? {rest.strip()}（多个匹配或不存在）"]
+            lines = [f"未找到会? {rest.strip()}（多个匹配或不存在）"]
             if sessions:
                 lines.append("最近的会话:")
                 for s in sessions:
-                    lines.append(f"  {s.session_id[:8]} �?{s.title} ({s.message_count} 条消�?")
+                    lines.append(f"  {s.session_id[:8]} ?{s.title} ({s.message_count} 条消?")
             event_bus.publish_nowait("system", EventType.MESSAGE, "\n".join(lines))
             return
         if conversations.load_session(sid):
@@ -910,11 +910,11 @@ async def _handle_cli_command(
             conversations.clear_checkpoint()
             if info:
                 event_bus.publish_nowait("system", EventType.MESSAGE,
-                    f"�?已恢复会�? {info.title} ({info.message_count} 条消�? {info.token_count} tokens)")
+                    f"?已恢复会? {info.title} ({info.message_count} 条消? {info.token_count} tokens)")
             else:
-                event_bus.publish_nowait("system", EventType.MESSAGE, f"�?已恢复会�?{sid[:8]}")
+                event_bus.publish_nowait("system", EventType.MESSAGE, f"?已恢复会?{sid[:8]}")
         else:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"会话不存�? {sid[:8]}")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"会话不存? {sid[:8]}")
 
     elif base == "/fork":
         parts = rest.split(None, 1) if rest else []
@@ -924,7 +924,7 @@ async def _handle_cli_command(
             return
         sid = conversations.resolve_session_id(parts[0].strip())
         if not sid:
-            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会�? {parts[0].strip()}（多个匹配或不存在）")
+            event_bus.publish_nowait("system", EventType.MESSAGE, f"未找到会? {parts[0].strip()}（多个匹配或不存在）")
             return
         turn_number = None
         if len(parts) > 1:
@@ -934,7 +934,7 @@ async def _handle_cli_command(
                     event_bus.publish_nowait("system", EventType.MESSAGE, "turn_number 必须 >= 1")
                     return
             except ValueError:
-                event_bus.publish_nowait("system", EventType.MESSAGE, f"turn_number 必须是数�? {parts[1]}")
+                event_bus.publish_nowait("system", EventType.MESSAGE, f"turn_number 必须是数? {parts[1]}")
                 return
         source = conversations.get_session_info(sid)
         if source is None:
@@ -945,7 +945,7 @@ async def _handle_cli_command(
         info = conversations.get_session_info(new_id)
         msg_count = info.message_count if info else "?"
         event_bus.publish_nowait("system", EventType.MESSAGE,
-            f"�?已分叉新会话: {new_id[:8]} �?{title}\n  消息�? {msg_count}\n  源会�? {sid[:8]} (轮次: {turn_number or '全部'})")
+            f"?已分叉新会话: {new_id[:8]} ?{title}\n  消息? {msg_count}\n  源会? {sid[:8]} (轮次: {turn_number or '全部'})")
 
     elif base == "/memory":
         from goat.memory import MemoryManager
@@ -962,16 +962,16 @@ async def _handle_cli_command(
             key = parts[0]
             if len(parts) == 2:
                 mm.set(key, parts[1])
-                event_bus.publish_nowait("system", EventType.MESSAGE, f"已记�? {key}")
+                event_bus.publish_nowait("system", EventType.MESSAGE, f"已记? {key}")
             else:
                 content = mm.get(key)
                 if content is None:
-                    event_bus.publish_nowait("system", EventType.MESSAGE, f"记忆不存�? {key}")
+                    event_bus.publish_nowait("system", EventType.MESSAGE, f"记忆不存? {key}")
                 else:
                     event_bus.publish_nowait("system", EventType.MESSAGE, f"[{key}]\n{content}")
 
     else:
-        event_bus.publish_nowait("system", EventType.MESSAGE, f"未知命令: {cmd}，输�?/help 查看帮助")
+        event_bus.publish_nowait("system", EventType.MESSAGE, f"未知命令: {cmd}，输?/help 查看帮助")
 
     return None
 
@@ -993,7 +993,7 @@ async def _do_flow_chat(
     await conversations.compress_context()
 
     event_bus.publish_nowait("system", EventType.MESSAGE,
-                             f"🔄 Flow 模式: 检测到复杂任务，进�?实现→审查→修复 闭环",
+                             f"🔄 Flow 模式: 检测到复杂任务，进?实现→审查→修复 闭环",
                              agent_name="system")
 
     report = await pipeline.run(message)
@@ -1054,7 +1054,7 @@ async def _do_chat(
             seen.add(t.name)
     all_tools = tools
 
-    skills = [f"{s.name} �?{s.description}" for s in skill_registry.list_all()]
+    skills = [f"{s.name} ?{s.description}" for s in skill_registry.list_all()]
     system_prompt = prompt_engine.render_main_system(
         "general", skills=skills, cwd=str(workspace or Path.cwd()),
         model=provider_config.model,
@@ -1133,7 +1133,7 @@ async def _do_chat(
         token_tracker.record_turn(input_text, output_text)
 
         if not response.tool_calls:
-            content = str(response.content) if response.content else "(无内�?"
+            content = str(response.content) if response.content else "(无内?"
             event_bus.publish_nowait(
                 "llm", EventType.LLM_RESPONSE,
                 content,
@@ -1187,7 +1187,7 @@ async def _do_chat(
                 is_yolo = (approval_system is not None and
                            approval_system.context.mode == PermissionMode.YOLO)
                 if not is_yolo and hook_output.decision == HookDecision.BLOCK:
-                    msg = f"工具 '{tc_name}' 被钩子系统阻�? {hook_output.reason}"
+                    msg = f"工具 '{tc_name}' 被钩子系统阻? {hook_output.reason}"
                     event_bus.publish_nowait(
                         "tool", EventType.ERROR, msg, agent_name="system",
                     )
@@ -1203,7 +1203,7 @@ async def _do_chat(
                     target_path=str(tc_args.get("filepath", tc_args.get("directory", ""))),
                 )
                 if approval_result.decision == Decision.BLOCK:
-                    msg = f"工具 '{tc_name}' 被审批系统拒�? {approval_result.message}"
+                    msg = f"工具 '{tc_name}' 被审批系统拒? {approval_result.message}"
                     event_bus.publish_nowait(
                         "tool", EventType.ERROR, msg, agent_name="system",
                     )
@@ -1222,7 +1222,7 @@ async def _do_chat(
                     if hook_auto_approved:
                         event_bus.publish_nowait(
                             "tool", EventType.MESSAGE,
-                            f"�?钩子自动批准: {tc_name}",
+                            f"?钩子自动批准: {tc_name}",
                             agent_name="system",
                         )
                     else:
@@ -1255,7 +1255,7 @@ async def _do_chat(
 
             tool = tool_name_map.get(tc_name)
             if tool is None:
-                result = f"工具不可�? {tc_name}"
+                result = f"工具不可? {tc_name}"
                 if hook_system:
                     await hook_system.on_post_tool_use(tc_name, tc_args, result)
             else:
@@ -1266,7 +1266,7 @@ async def _do_chat(
                         tmo = tc_args.get("timeout", 60)
                         event_bus.publish_nowait(
                             "tool", EventType.MESSAGE,
-                            f"�?执行命令: {cmd[:80]}",
+                            f"?执行命令: {cmd[:80]}",
                             agent_name="system",
                         )
                         stream_lines = []
@@ -1342,11 +1342,11 @@ async def _do_chat(
                                              agent_name="system")
                 else:
                     event_bus.publish_nowait("system", EventType.MESSAGE,
-                                             "�?审查通过", agent_name="system")
+                                             "?审查通过", agent_name="system")
 
     event_bus.publish_nowait(
         "system", EventType.MESSAGE,
-        f"达到最大轮�?({MAX_AGENT_TURNS})",
+        f"达到最大轮?({MAX_AGENT_TURNS})",
         agent_name="system",
     )
     event_bus.publish_nowait(
@@ -1397,13 +1397,13 @@ async def _test_llm_connection(config: ProviderConfig, timeout: int = 10) -> tup
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "insufficient_quota" in err_str:
-            return False, f"API 配额不足 (429)，请检查账户余�? {err_str[:120]}"
+            return False, f"API 配额不足 (429)，请检查账户余? {err_str[:120]}"
         if "401" in err_str or "Unauthorized" in err_str or "invalid_api_key" in err_str:
-            return False, f"API Key 无效 (401)，请检查密�? {err_str[:120]}"
+            return False, f"API Key 无效 (401)，请检查密? {err_str[:120]}"
         if "404" in err_str or "model_not_found" in err_str:
-            return False, f"模型不存�?(404)，请检查模型名: {err_str[:120]}"
+            return False, f"模型不存?(404)，请检查模型名: {err_str[:120]}"
         if "Connection" in err_str or "timeout" in err_str.lower():
-            return False, f"连接失败，请检�?Base URL: {err_str[:120]}"
+            return False, f"连接失败，请检?Base URL: {err_str[:120]}"
         return False, f"连接测试失败: {err_str[:120]}"
 
 
@@ -1562,7 +1562,7 @@ async def _init_mcp_connections(event_bus: EventBus, settings: dict):
         event_bus.publish_nowait(
             source_id="tui",
             event_type=EventType.MESSAGE,
-            payload=f"正在连接 {len(connections)} �?MCP 服务�?..",
+            payload=f"正在连接 {len(connections)} ?MCP 服务?..",
             agent_name="system",
         )
 
@@ -1579,7 +1579,7 @@ async def _init_mcp_connections(event_bus: EventBus, settings: dict):
         event_bus.publish_nowait(
             source_id="tui",
             event_type=EventType.ERROR,
-            payload=f"MCP 初始化失�? {e}",
+            payload=f"MCP 初始化失? {e}",
             agent_name="system",
         )
 

@@ -91,6 +91,35 @@ async def update_workspace(payload: dict):
     raise HTTPException(status_code=400, detail=msg)
 
 
+@router.get("/skills")
+async def list_skills():
+    if web_chat_handler is None:
+        return {"skills": []}
+    reg = getattr(web_chat_handler, 'skill_registry', None)
+    if reg is None:
+        return {"skills": []}
+    return {
+        "skills": [
+            {"name": s.name, "description": s.description}
+            for s in reg.list_all()
+        ]
+    }
+
+
+@router.post("/skills/reload")
+async def reload_skills():
+    if web_chat_handler is None:
+        return {"success": False, "error": "WebChatHandler not initialized"}
+    reg = getattr(web_chat_handler, 'skill_registry', None)
+    if reg is None:
+        return {"success": False, "error": "SkillRegistry not available"}
+    from goat.core.workspace import get_skills_dir
+    skills_dir = get_skills_dir()
+    if skills_dir.exists():
+        reg.load_skills_from_directory(skills_dir)
+    return {"success": True, "count": len(reg.list_all())}
+
+
 @router.get("/sessions")
 async def list_sessions():
     if web_chat_handler is None or web_chat_handler.conversations is None:
@@ -164,6 +193,61 @@ async def get_messages(session_id: str):
     if web_chat_handler is None or web_chat_handler.conversations is None:
         return {"sessionId": session_id, "messages": []}
     messages = web_chat_handler.conversations.get_session_messages(session_id)
+
+    records = list(messages)
+    records.reverse()
+
+    tool_results: list[dict] = []
+    assistant_tool_call_indices: list[int] = []
+
+    for idx, m in enumerate(records):
+        meta = m.metadata or {}
+        if m.role == "assistant" and meta.get("tool_calls"):
+            assistant_tool_call_indices.append(idx)
+        elif m.role == "tool":
+            tool_results.append({
+                "tool_call_id": meta.get("tool_call_id", ""),
+                "result": m.content,
+            })
+
+    tool_call_map: dict[int, list[dict]] = {}
+    used_indices: set[int] = set()
+
+    for ai_idx in assistant_tool_call_indices:
+        m = records[ai_idx]
+        meta = m.metadata or {}
+        paired = []
+
+        for tc in meta.get("tool_calls", []):
+            tc_id = tc.get("id", "")
+            result_text = ""
+            found = -1
+
+            if tc_id:
+                for ri, r in enumerate(tool_results):
+                    if ri not in used_indices and r["tool_call_id"] == tc_id:
+                        result_text = r["result"]
+                        found = ri
+                        break
+
+            if found < 0:
+                for ri, r in enumerate(tool_results):
+                    if ri not in used_indices:
+                        result_text = r["result"]
+                        found = ri
+                        break
+
+            if found >= 0:
+                used_indices.add(found)
+
+            paired.append({
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+                "result": result_text,
+                "status": "complete",
+            })
+        tool_call_map[ai_idx] = paired
+
     return {
         "sessionId": session_id,
         "messages": [
@@ -172,8 +256,10 @@ async def get_messages(session_id: str):
                 "role": m.role,
                 "content": m.content,
                 "createdAt": m.created_at,
+                "metadata": m.metadata or {},
+                "toolCalls": tool_call_map.get(idx, None),
             }
-            for m in messages
+            for idx, m in enumerate(records)
         ],
     }
 

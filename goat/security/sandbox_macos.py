@@ -78,7 +78,7 @@ class MacOSSandbox(BaseSandbox):
         except asyncio.TimeoutError:
             return SandboxResult(-1, "", "进程启动超时", sandbox_type="macos")
         except FileNotFoundError as e:
-            return SandboxResult(-1, "", f"命令未找�? {e}", sandbox_type="macos")
+            return SandboxResult(-1, "", f"命令未找? {e}", sandbox_type="macos")
         except Exception as e:
             return SandboxResult(-1, "", f"启动失败: {e}", sandbox_type="macos")
 

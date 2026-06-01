@@ -52,7 +52,7 @@ class LinuxSandbox(BaseSandbox):
         except asyncio.TimeoutError:
             return SandboxResult(-1, "", "进程启动超时", sandbox_type="linux")
         except FileNotFoundError as e:
-            return SandboxResult(-1, "", f"命令未找�? {e}", sandbox_type="linux")
+            return SandboxResult(-1, "", f"命令未找? {e}", sandbox_type="linux")
         except Exception as e:
             return SandboxResult(-1, "", f"启动失败: {e}", sandbox_type="linux")
 

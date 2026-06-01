@@ -54,7 +54,7 @@ def _notify_retry(tool_name: str, attempt: int, max_retries: int, delay: float, 
     from goat.core.event_bus import EventType
     _event_bus.publish_nowait(
         "retry", EventType.TOOL_RETRY,
-        f"🔄 {tool_name} 重试�?({attempt}/{max_retries})，{delay:.1f}s 后重�?�?{error}",
+        f"🔄 {tool_name} 重试?({attempt}/{max_retries})，{delay:.1f}s 后重??{error}",
     )
 
 

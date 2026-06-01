@@ -10,6 +10,7 @@ export class WSClient {
   private statusHandlers: Set<StatusHandler> = new Set()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _status: ConnectionStatus = 'disconnected'
+  private pendingQueue: Array<{ type: string; payload: Record<string, unknown> }> = []
 
   constructor(url: string = '') {
     this.url = url || this.detectUrl()
@@ -31,6 +32,7 @@ export class WSClient {
     this.ws = new WebSocket(this.url)
     this.ws.onopen = () => {
       this.setStatus('connected')
+      this.flushQueue()
     }
     this.ws.onclose = () => {
       this.setStatus('disconnected')
@@ -52,6 +54,15 @@ export class WSClient {
     }
   }
 
+  private flushQueue(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const queue = this.pendingQueue
+    this.pendingQueue = []
+    for (const msg of queue) {
+      this.ws.send(JSON.stringify({ type: msg.type, payload: msg.payload }))
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return
     this.reconnectTimer = setTimeout(() => {
@@ -68,11 +79,17 @@ export class WSClient {
     this.ws?.close()
     this.ws = null
     this.setStatus('disconnected')
+    this.pendingQueue = []
   }
 
   send(type: string, payload: Record<string, unknown> = {}): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type, payload }))
+    } else if (this.ws?.readyState === WebSocket.CONNECTING) {
+      this.pendingQueue.push({ type, payload })
+    } else {
+      this.pendingQueue.push({ type, payload })
+      this.connect()
     }
   }
 

@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { WSClient } from '@/lib/ws-client'
 import { useChatStore } from '@/stores/chatStore'
 import { useConnectionStore } from '@/stores/connectionStore'
-import type { PendingApproval } from '@/types'
+import type { PendingApproval, PermissionMode, ToolCall } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 function getSessionId(msg: any): string {
@@ -37,6 +37,12 @@ export function useWebSocket() {
       if (typeof p.tokenOutput === 'number') useConnectionStore.getState().setTokenOutput(p.tokenOutput)
       if (typeof p.cost === 'number') useConnectionStore.getState().setCost(p.cost)
       if (typeof p.messageCount === 'number') useConnectionStore.getState().setMessageCount(p.messageCount)
+      if (typeof p.mode === 'string') {
+        const validModes: PermissionMode[] = ['plan', 'agent', 'yolo', 'flow']
+        if (validModes.includes(p.mode as PermissionMode)) {
+          useConnectionStore.getState().setMode(p.mode as PermissionMode)
+        }
+      }
     })
 
     const unsubResponse = client.on('chat.response', (msg) => {
@@ -68,6 +74,18 @@ export function useWebSocket() {
         diffContent: (msg.payload.diffContent as string) || undefined,
       }
       useChatStore.getState().setPendingApproval(sid, pending)
+    })
+
+    const unsubToolComplete = client.on('tool.complete', (msg) => {
+      const p = msg.payload
+      const sid = getSessionId(msg)
+      const tc: ToolCall = {
+        name: (p.toolName as string) || '',
+        args: (p.args as Record<string, unknown>) || {},
+        result: (p.result as string) || '',
+        status: 'complete',
+      }
+      useChatStore.getState().addToolCall(sid, tc)
     })
 
     const unsubAskUser = client.on('ask_user', (msg) => {
@@ -149,6 +167,7 @@ export function useWebSocket() {
       unsubResponse()
       unsubError()
       unsubApproval()
+      unsubToolComplete()
       unsubAskUser()
       unsubNotification()
       unsubSubagentLifecycle()

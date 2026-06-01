@@ -107,7 +107,7 @@ export default function StatusBar() {
 
   return (
     <div className="h-7 bg-surface border-t border-border flex items-center px-3 text-xs text-text-dim gap-4">
-      <span className="text-text-darker select-none">\uD83D\uDC10 GOAT</span>
+      <span className="text-text-darker select-none">{'\uD83D\uDC10'} GOAT</span>
 
       {(providerName || modelName) && (
         <span className="text-text-darker">

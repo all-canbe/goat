@@ -12,7 +12,7 @@ export default function ApprovalOverlay() {
   const handleApprove = () => {
     const ws = (window as any).__wsClient
     if (ws) {
-      ws.send('tool.approve', { toolCallId: pendingApproval.toolCallId })
+      ws.send('tool.approve', { toolCallId: pendingApproval.toolCallId, sessionId: activeSessionId || 'default' })
     }
     useChatStore.getState().setPendingApproval(activeSessionId || 'default', null)
   }
@@ -20,7 +20,7 @@ export default function ApprovalOverlay() {
   const handleReject = () => {
     const ws = (window as any).__wsClient
     if (ws) {
-      ws.send('tool.reject', { toolCallId: pendingApproval.toolCallId })
+      ws.send('tool.reject', { toolCallId: pendingApproval.toolCallId, sessionId: activeSessionId || 'default' })
     }
     useChatStore.getState().setPendingApproval(activeSessionId || 'default', null)
   }

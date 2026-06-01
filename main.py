@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Goat ？gent 工具，支持子 Agent 并行调度与对话管？用法:
+Goat Agent 工具，支持子 Agent 并行调度与对话管理。用法:
     # 运行 CLI
     goat
 
     # 运行 TUI
     goat_tui
 
-启动后按提示输入 base_url、api_key、model 完成初始化？��后进入交互命令行，支持以下命令:
+启动后按提示输入 base_url、api_key、model 完成初始化，然后进入交互命令行，支持以下命令:
 
-    /spawn <角色> <任务>  ？��动创建？gent
-    /list                 ？��出所有子 Agent
-    /collect [ids]        ？��集？gent 结果
-    /cancel <id>          ？��消？gent
-    /eval <id> <msg>      ？��子 Agent 发送消？   /sessions             ？��出对话历史
-    /session [id]         ？��换会话
-    /new [title]          ？��建新会？   /search <关键？      ？��索历史消息
-    /export [id] [format] ？��出会话
-    /skills [list]        ？��出可用技？   /skills find <描述>    ？��索？kill
-    /skills install <url> [--global] ？��装 skill
-    /roles                ？��出可用角色类型
-    /status               ？��示系统状？   /help                 ？��示帮助
-    /quit                 ？��？"""
+    /spawn <角色> <任务>   启动创建 Agent
+    /list                  列出所有子 Agent
+    /collect [ids]         收集 Agent 结果
+    /cancel <id>           取消 Agent
+    /eval <id> <msg>       向子 Agent 发送消息
+    /sessions              列出对话历史
+    /session [id]          切换会话
+    /new [title]           创建新会话
+    /search <关键词>       搜索历史消息
+    /export [id] [format]  导出会话
+    /skills [list]         列出可用技能
+    /skills find <描述>    搜索 Skill
+    /skills install <url> [--global]  安装 skill
+    /roles                 列出可用角色类型
+    /status                显示系统状态
+    /help                  显示帮助
+    /quit                  退出
+"""
 
 
 from __future__ import annotations
@@ -93,11 +98,41 @@ Agent 并行调度 | 多模式审批 | 对话管理
 ╚═════════════════════════════════════════╝
 """
 
-HELP_TEXT = """
-模式说明:
-  默认 [Agent 模式] 直接输入内容即与 AI 对话
+HELP_TEXT = """模式说明:
+  默认 [Agent 模式] 直接输入内容即可与 AI 对话
   输入 /mode 切换[命令模式] 提示符变化
 
+命令列表:
+  /spawn <角色> <任务>    启动创建 Agent
+  /list                   列出所有子 Agent
+  /collect [ids]          收集 Agent 结果
+  /cancel <id>            取消 Agent
+  /eval <id> <msg>        向子 Agent 发送消息
+
+  /sessions               列出对话历史
+  /session [id]           切换会话
+  /new [title]            创建新会话
+  /search <关键词>        搜索历史消息
+  /export [id] [format]   导出会话
+  /fork <session_id> [turn]  分叉会话
+
+  /skills [list]          列出可用技能
+  /skills find <描述>     搜索 Skill
+  /skills install <url> [--global]  安装 skill
+  /roles                  列出可用角色类型
+
+  /plan                   切换到 Plan 模式 (只读)
+  /agent                  切换到 Agent 模式 (每次确认)
+  /flow                   切换到 Flow 模式 (实现->审查->修复)
+  /yolo                   切换到 YOLO 模式 (全部自动)
+  /mode                   切换 Agent/命令模式
+
+  /cost                   查看 Token 消耗
+  /status                 显示系统状态
+  /help                   显示帮助
+  /quit                   退出
+
+提示: 输入 / 开头的命令，否则直接输入内容即为与 AI 对话
 """
 
 
@@ -234,23 +269,23 @@ class CLI:
             display = get_provider_display(self.provider_config)
             print(f"  读取已保存的配置: {display}\n")
         else:
-            print("请配？LM 连接参数:\n")
+            print("请配LM 连接参数:\n")
             self.provider_config = self._prompt_provider_selection()
 
-            max_concurrent = input("  最大并发子 Agent ？默认 10): ").strip()
+            max_concurrent = input("  最大并发子 Agent (默认 10): ").strip()
             try:
                 max_concurrent = int(max_concurrent) if max_concurrent else 10
             except ValueError:
                 max_concurrent = 10
             max_concurrent = min(max_concurrent, 20)
 
-            max_depth = input("  最大嵌套深？默认 3): ").strip()
+            max_depth = input("  最大嵌套深默认 3): ").strip()
             try:
                 max_depth = int(max_depth) if max_depth else 3
             except ValueError:
                 max_depth = 3
 
-        print(f"\n  正在初始？.")
+        print(f"\n  正在初始.")
         self.llm = create_llm(self.provider_config)
         self.manager = SubAgentManager(
             max_concurrent=max_concurrent,
@@ -347,13 +382,13 @@ class CLI:
             max_depth,
             provider=self.provider_config.provider_type.value,
         )
-        print(f"  ？��始化完？ {get_provider_display(self.provider_config)} | 并发上限: {max_concurrent} | 深度上限: {max_depth}\n")
+        print(f"  始化完 {get_provider_display(self.provider_config)} | 并发上限: {max_concurrent} | 深度上限: {max_depth}\n")
 
         checkpoint = self.conversations.get_last_checkpoint()
         if checkpoint:
-            print(f"  📌 发现上次退出时的会话断？")
+            print(f"  📌 发现上次退出时的会话断点")
             print(f"     会话: {checkpoint['title']}")
-            print(f"     消息: {checkpoint['message_count']} ？ Token: {checkpoint['token_count']}")
+            print(f"     消息: {checkpoint['message_count']}  Token: {checkpoint['token_count']}")
             print(f"     输入 /resume 恢复，或直接开始新对话")
 
     def _init_tasks(self) -> None:
@@ -387,7 +422,7 @@ class CLI:
             results = []
             for i, cmd in enumerate(cmds):
                 if ctx.cancel_token.is_set():
-                    return f"任务被取消，已完？{i}/{len(cmds)}"
+                    return f"任务被取消，已完{i}/{len(cmds)}"
                 ctx.current_step = f"执行: {cmd[:60]}"
                 ctx.progress = i / len(cmds)
                 r = execute.invoke({"command": cmd})
@@ -433,7 +468,7 @@ class CLI:
                 sc = load_skill_from_directory(sc_dir)
                 if sc:
                     self.skill_registry.register(sc)
-                    print(f"  📦 已注册初始技？skill-creator")
+                    print(f"  📦 已注册初始技能 skill-creator")
 
         if not self.skill_registry.list_all():
             from goat.tools.tools import BUILTIN_TOOLS as bt
@@ -475,8 +510,8 @@ class CLI:
 
         self._event_listener_task = asyncio.create_task(self._event_listener())
 
-        print("输入 /help 查看命令？uit 退出\n")
-        print("当前？Agent 模式]，直接输入内容即？I 对话\n")
+        print("输入 /help 查看命令帮助，/quit 退出\n")
+        print("当前 [Agent 模式]，直接输入内容即可与 AI 对话\n")
 
         while self.running:
             try:
@@ -485,7 +520,7 @@ class CLI:
                     None, lambda: input(prefix).strip()
                 )
             except (EOFError, KeyboardInterrupt):
-                print("\n正在退？.")
+                print("\n正在退.")
                 break
 
             if not user_input:
@@ -500,22 +535,22 @@ class CLI:
                         find_query = after_skills[4:].lstrip()
                 if find_query:
                     prompt = (
-                        f"请使？ind-skills skill 搜索与「{find_query}」相关的可用 skill。\n"
+                        f"请使ind-skills skill 搜索与「{find_query}」相关的可用 skill。\n"
                         f"如果 find-skills skill 不可用，请通过 WebSearch 搜索 npx skills 仓库。\n"
-                        f"请清晰地列出找到的每？kill 的：名称、描述、安？RL。\n"
+                        f"请清晰地列出找到的每kill 的：名称、描述、安RL。\n"
                         f"搜索完毕后我会告知你安装选项。"
                     )
                     await self._do_chat(prompt)
 
                     # ── 交互式安装选择 ──
                     print(f"\n{'─'*50}")
-                    print("📋 以上是搜索结果。输？kill URL 进行安装（从上方列表复制），或输？ 取消:")
+                    print("📋 以上是搜索结果。输kill URL 进行安装（从上方列表复制），或输 取消:")
                     choice = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input("  请输？").strip()
+                        None, lambda: input("  请输").strip()
                     )
                     if choice and choice != "0":
                         scope = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: input("  安装？(1) 本项？(2) 全局? [默认 1]: ").strip()
+                            None, lambda: input("  安装(1) 本项(2) 全局? [默认 1]: ").strip()
                         )
                         install_args = choice
                         if scope == "2":
@@ -569,7 +604,7 @@ class CLI:
                     print("用法: /cancel <agent_id>")
                     return
                 await self.manager.cancel(args.strip())
-                print(f"已取？gent {args.strip()}")
+                print(f"已取消 Agent {args.strip()}")
             case "/eval":
                 eval_parts = args.split(maxsplit=1)
                 if len(eval_parts) < 2:
@@ -588,7 +623,7 @@ class CLI:
                     if not query:
                         print("用法: /skills find <描述>")
                     else:
-                        print(f"🔍 正在搜索 skill: {query}，请等待 Agent 响应...")
+                        print(f"🔍 正在搜索技能: {query}，请等待 Agent 响应...")
                 else:
                     self._list_skills()
             case "/roles":
@@ -612,19 +647,19 @@ class CLI:
                 mode_name = "Agent" if self.agent_mode else "命令"
                 print(f"已切换到 [{mode_name} 模式]")
                 if self.agent_mode:
-                    print("直接输入内容即可？I 对话，输？ 开头为命令")
+                    print("直接输入内容即可与 AI 对话，输入 / 开头为命令")
                 else:
-                    print("提示符已变为 🔧，直接输入内容可？I 对话，输？ 开头为命令")
+                    print("提示符已变为 🔧，直接输入内容可与 AI 对话，输入 / 开头为命令")
             case "/plan":
                 self.approval_system.set_mode(PermissionMode.PLAN)
                 print("已切换到 [Plan 模式] 🔍")
                 print("  只读模式 — 探索代码并制定计划")
                 print("  计划完成后，系统会询问你是否执行")
-                print("  输入 /agent ？olo 可直接切换到执行模式")
+                print("  输入 /agent /yolo 可直接切换到执行模式")
             case "/agent":
                 self.approval_system.set_mode(PermissionMode.DEFAULT)
                 print("已切换到 [Agent 模式] 🤖")
-                print("  默认交互模式 ？��次操作都会询问确认")
+                print("  默认交互模式 - 每次操作都会询问确认")
             case "/yolo":
                 self.approval_system.set_mode(PermissionMode.YOLO)
                 print("已切换到 [YOLO 模式] 😈")
@@ -632,8 +667,8 @@ class CLI:
             case "/flow":
                 self.approval_system.set_mode(PermissionMode.FLOW)
                 print("已切换到 [Flow 模式] 🔄")
-                print("  流程模式 ？��杂任务自动进入 实现→审查→修复 闭环")
-                print("  简单问题直接回答，不消耗审？oken")
+                print("  流程模式 - 复杂任务自动进入 实现->审查->修复 闭环")
+                print("  简单问题直接回答，不消耗审查 Token")
             case "/sessions":
                 self._list_sessions()
             case "/session":
@@ -643,26 +678,26 @@ class CLI:
             case "/session_rename":
                 rename_parts = args.split(maxsplit=1)
                 if len(rename_parts) < 2:
-                    print("用法: /session_rename <session_id> <新名？")
+                    print("用法: /session_rename <session_id> <新名")
                     return
                 sid = self.conversations.resolve_session_id(rename_parts[0])
                 if not sid:
-                    print(f"未找到会？{rename_parts[0]}（多个匹配或不存在）")
+                    print(f"未找到会{rename_parts[0]}（多个匹配或不存在）")
                     return
                 if self.conversations.rename_session(sid, rename_parts[1]):
-                    print(f"会话 {sid[:8]} 已重命名？{rename_parts[1]}")
+                    print(f"会话 {sid[:8]} 已重命名为 {rename_parts[1]}")
                 else:
-                    print(f"重命名失？{rename_parts[0]}")
+                    print(f"重命名失败 {rename_parts[0]}")
             case "/session_delete":
                 if not args:
                     print("用法: /session_delete <session_id>")
                     return
                 sid = self.conversations.resolve_session_id(args.strip())
                 if not sid:
-                    print(f"未找到会？{args.strip()}（多个匹配或不存在）")
+                    print(f"未找到会{args.strip()}（多个匹配或不存在）")
                     return
                 if self.conversations.delete_session(sid):
-                    print(f"已删除会？{sid[:8]}")
+                    print(f"已删除会话 {sid[:8]}")
                 else:
                     print(f"删除会话失败: {sid[:8]}")
             case "/export":
@@ -684,16 +719,16 @@ class CLI:
                 else:
                     print(result[:2000])
                     if len(result) > 2000:
-                        print(f"... (？{len(result)} 字符)")
+                        print(f"... ({len(result)} 字符)")
             case "/search":
                 if not args:
-                    print("用法: /search <关键？")
+                    print("用法: /search <关键")
                     return
                 results = self.conversations.search_messages(args.strip())
                 if not results:
                     print("未找到匹配消息")
                     return
-                print(f"\n找到 {len(results)} 条匹配消？")
+                print(f"\n找到 {len(results)} 条匹配消")
                 for r in results[:10]:
                     preview = r.content[:100].replace("\n", " ")
                     print(f"  [{r.session_id[:8]}] {r.role}: {preview}")
@@ -722,16 +757,16 @@ class CLI:
             case "/task_recover":
                 recovered = await self.task_manager.recover()
                 if recovered:
-                    print(f"已恢？{len(recovered)} 个任？")
+                    print(f"已恢{len(recovered)} 个任")
                     for r in recovered:
-                        print(f"  {r.task_id} ？{r.name}: {r.description[:50]}")
+                        print(f"  {r.task_id} {r.name}: {r.description[:50]}")
                 else:
                     print("没有需要恢复的任务")
             case "/quit":
                 self.running = False
                 print("再见! 👋")
             case _:
-                print(f"未知命令: {cmd}，输？help 查看帮助")
+                print(f"未知命令: {cmd}，输help 查看帮助")
 
     def _get_mode_instructions(self) -> tuple[str, str]:
         if self.approval_system is None:
@@ -752,9 +787,9 @@ class CLI:
         print(f"{sep}", flush=True)
         if plan_path:
             print(f"  📄 计划文件: {plan_path}")
-        print(f"  (a) Agent 模式执行 ？��换？GENT 模式执行（每次确认）")
-        print(f"  (y) YOLO 模式执行   ？��换？OLO 模式自动执行")
-        print(f"  (n) 继续修改        ？��持 Plan 模式继续完善")
+        print(f"  (a) Agent 模式执行 换GENT 模式执行（每次确认）")
+        print(f"  (y) YOLO 模式执行   换OLO 模式自动执行")
+        print(f"  (n) 继续修改        持 Plan 模式继续完善")
         print()
         choice = await asyncio.get_event_loop().run_in_executor(
             None, lambda: input("  请选择 [a/y/n]: ").strip().lower()
@@ -762,11 +797,11 @@ class CLI:
 
         if choice in ("a", "agent"):
             self.approval_system.set_mode(PermissionMode.DEFAULT)
-            print(f"\n  ？��切换到 Agent 模式，开始执行计？.", flush=True)
+            print(f"\n  🤖 已切换到 Agent 模式，开始执行计划...", flush=True)
             await self._do_chat("请按照上述计划开始执行，一步步完成。")
         elif choice in ("y", "yolo"):
             self.approval_system.set_mode(PermissionMode.YOLO)
-            print(f"\n  🤖 已切换到 YOLO 模式，开始自动执行计？.", flush=True)
+            print(f"\n  🤖 已切换到 YOLO 模式，开始自动执行计划...", flush=True)
             await self._do_chat("请按照上述计划开始执行，一步步完成。")
         else:
             print(f"\n  📝 继续完善计划...", flush=True)
@@ -811,7 +846,7 @@ class CLI:
                 seen.add(t.name)
         all_tools = tools
 
-        skills = [f"{s.name} ？{s.description}" for s in self.skill_registry.list_all()]
+        skills = [f"{s.name} {s.description}" for s in self.skill_registry.list_all()]
         mode_label, mode_desc = self._get_mode_instructions()
         system_prompt = prompt_engine.render_main_system(
             "general", skills=skills, cwd=str(self.workspace),
@@ -834,7 +869,7 @@ class CLI:
 
         llm_with_tools = self.llm.bind_tools(all_tools)
 
-        print(f"\n🤖 ？gent 正在处理: {message[:80]}...\n")
+        print(f"\n🤖 gent 正在处理: {message[:80]}...\n")
 
         for turn in range(MAX_AGENT_TURNS):
             if self.cancel_token.is_cancelled():
@@ -857,7 +892,7 @@ class CLI:
                     if chunk.content:
                         print(chunk.content, end="", flush=True)
             except Exception as e:
-                print(f"\n？LM 调用失败: {e}")
+                print(f"\nLM 调用失败: {e}")
                 return
 
             print(flush=True)
@@ -941,8 +976,8 @@ class CLI:
                         target_path=str(tc_args.get("filepath", tc_args.get("directory", ""))),
                     )
                     if approval_result.decision == Decision.BLOCK:
-                        msg = f"工具 '{tc_name}' 被审批系统拒？{approval_result.message}"
-                        print(f"    ？{msg}", flush=True)
+                        msg = f"工具 '{tc_name}' 被审批系统拒{approval_result.message}"
+                        print(f"    {msg}", flush=True)
                         tool_msg = ToolMessage(content=msg, tool_call_id=tc_id)
                         await self.conversations.add_message(tool_msg)
                         continue
@@ -956,10 +991,10 @@ class CLI:
                             except Exception:
                                 pass
                         if hook_auto_approved:
-                            print(f"    ？��子自动批准: {tc_name}", flush=True)
+                            print(f"    子自动批准: {tc_name}", flush=True)
                         else:
                             detail = _format_tool_detail(tc_name, tc_args)
-                            print(f"    ？{approval_result.message}", flush=True)
+                            print(f"    {approval_result.message}", flush=True)
                             if detail:
                                 print(detail, flush=True)
                             confirm = await asyncio.get_event_loop().run_in_executor(
@@ -967,7 +1002,7 @@ class CLI:
                             )
                             if confirm not in ("y", "yes"):
                                 msg = f"用户拒绝工具 '{tc_name}'"
-                                print(f"    ？{msg}", flush=True)
+                                print(f"    {msg}", flush=True)
                                 tool_msg = ToolMessage(content=msg, tool_call_id=tc_id)
                             await self.conversations.add_message(tool_msg)
                             continue
@@ -981,15 +1016,15 @@ class CLI:
                     is_yolo = (self.approval_system is not None and
                                self.approval_system.context.mode == PermissionMode.YOLO)
                     if not is_yolo and hook_output.decision == HookDecision.BLOCK:
-                        msg = f"工具 '{tc_name}' 被钩子系统阻？{hook_output.reason}"
-                        print(f"    ？{msg}", flush=True)
+                        msg = f"工具 '{tc_name}' 被钩子系统阻{hook_output.reason}"
+                        print(f"    {msg}", flush=True)
                         tool_msg = ToolMessage(content=msg, tool_call_id=tc_id)
                         await self.conversations.add_message(tool_msg)
                         continue
 
                 tool = tool_name_map.get(tc_name)
                 if tool is None:
-                    result = f"工具不可？{tc_name}"
+                    result = f"工具不可{tc_name}"
                     if self.hook_system:
                         await self.hook_system.on_post_tool_use(tc_name, tc_args, result)
                 else:
@@ -998,7 +1033,7 @@ class CLI:
                             cmd = tc_args.get("command", "")
                             wd = tc_args.get("working_dir", ".")
                             tmo = tc_args.get("timeout", 60)
-                            print(f"    ？��行？. ({cmd[:80]})", flush=True)
+                            print(f"    行. ({cmd[:80]})", flush=True)
                             print(f"    {'─' * 60}", flush=True)
                             stream_lines = []
                             def on_line(line: str):
@@ -1009,7 +1044,7 @@ class CLI:
                                 on_stdout=on_line, on_stderr=on_line,
                             )
                             print(f"    {'─' * 60}", flush=True)
-                            print(f"    ？��成 (exit code: {returncode})", flush=True)
+                            print(f"    成 (exit code: {returncode})", flush=True)
                             output = stdout_text
                             if stderr_text:
                                 output += "\n[stderr]\n" + stderr_text
@@ -1037,11 +1072,11 @@ class CLI:
                 result_str = str(result)
                 if tc_name == "execute_command" and len(result_str) > 500:
                     preview = result_str[:500]
-                    print(f"    结果摘要: {preview}... (？{len(result_str)} 字符)", flush=True)
+                    print(f"    结果摘要: {preview}... ({len(result_str)} 字符)", flush=True)
                 elif tc_name != "execute_command":
                     if len(result_str) > 500:
                         preview = result_str[:500]
-                        print(f"    结果: {preview}... (？{len(result_str)} 字符)", flush=True)
+                        print(f"    结果: {preview}... ({len(result_str)} 字符)", flush=True)
                     else:
                         print(f"    结果: {result_str}", flush=True)
 
@@ -1064,9 +1099,9 @@ class CLI:
                         await self.conversations.add_message(review_msg)
                         print(f"    📋 审查发现 {len(findings)} 个问题，继续修正...", flush=True)
                     else:
-                        print("    ？��查通过", flush=True)
+                        print("    查通过", flush=True)
 
-        print(f"\n⚠️ 达到最大轮？{MAX_AGENT_TURNS})", flush=True)
+        print(f"\n⚠️ 达到最大轮{MAX_AGENT_TURNS})", flush=True)
 
         if (self.approval_system is not None
                 and self.approval_system.context.mode == PermissionMode.PLAN):
@@ -1077,7 +1112,7 @@ class CLI:
             plan_path = self._save_plan(plan_content) if plan_content.strip() else None
             await self._handle_plan_approval(plan_path)
 
-    # ── P0: Stop Hook ？��务完成验证 ──
+    # ── P0: Stop Hook 务完成验证 ──
 
     _VERIFY_MUTATION = frozenset({
         "write_file", "delete_file", "move_file", "copy_file",
@@ -1148,10 +1183,10 @@ class CLI:
         plan_file = plans_dir / f"plan_{timestamp}.md"
 
         header = (
-            f"# Plan ？{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"# Plan {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
         plan_file.write_text(header + content, encoding="utf-8")
-        print(f"  📄 计划已保？{plan_file}", flush=True)
+        print(f"  📄 计划已保存 {plan_file}", flush=True)
         return plan_file
 
     async def _do_spawn(self, role_str: str, task: str) -> None:
@@ -1159,7 +1194,7 @@ class CLI:
             role_type = RoleType(role_str.lower())
         except ValueError:
             valid = [r.value for r in RoleType]
-            print(f"无效的角？{role_str}'，可？{valid}")
+            print(f"无效的角{role_str}'，可{valid}")
             return
 
         role_def = get_role(role_type)
@@ -1220,7 +1255,7 @@ class CLI:
             )
         )
 
-        print(f"？？Agent 已启？{agent.name} [{agent.agent_id}]")
+        print(f"✅ Agent 已启动 {agent.name} [{agent.agent_id}]")
         print(f"   角色: {role_type.value} | 任务: {task[:80]}")
 
     async def _do_flow(self, task: str) -> None:
@@ -1235,8 +1270,8 @@ class CLI:
         review_model = self.review_llm.model if hasattr(self.review_llm, 'model') else impl_model
 
         print(f"\n{'─'*50}")
-        print(f"  📋 /flow ？mplement ？eview ？ix")
-        print(f"  🛠？实现: {impl_model}  |  🔍 审查: {review_model} (只读)")
+        print(f"  📋 /flow mplement eview ix")
+        print(f"  🛠实现: {impl_model}  |  🔍 审查: {review_model} (只读)")
         print(f"  📝 任务: {task[:100]}")
         print(f"  📐 最大迭代 3 次")
         print(f"{'─'*50}")
@@ -1251,16 +1286,16 @@ class CLI:
         for i, findings in enumerate(report.findings_history, 1):
             if findings:
                 findings_count += len(findings)
-                print(f"\n  🔍 Round {i} ？{len(findings)} issue(s):")
+                print(f"\n  🔍 Round {i} {len(findings)} issue(s):")
                 for f in findings:
                     print(f"    [{f.severity.upper()}] {f.file_path}:{f.line or '?'} - {f.description}")
             else:
-                print(f"\n  🔍 Round {i} ？ASS")
+                print(f"\n  🔍 Round {i} ASS")
 
         print(f"\n  {'─'*48}")
         print(f"  {report.summary}")
         print(f"  总计发现问题: {findings_count}")
-        print(f"  状？{'？ASS' if report.success else '？ARTIAL (max iterations)'}")
+        print(f"  状{'ASS' if report.success else 'ARTIAL (max iterations)'}")
         print()
 
     async def _resume_session(self, args: str) -> None:
@@ -1270,10 +1305,10 @@ class CLI:
                 sid = checkpoint["session_id"]
                 print(f"  发现上次断点:")
                 print(f"    会话: {checkpoint['title']}")
-                print(f"    消息？{checkpoint['message_count']}")
+                print(f"    消息数: {checkpoint['message_count']}")
                 print(f"    Token: {checkpoint['token_count']}")
                 resp = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: input("  恢复该会？[Y/n]: ").strip().lower()
+                    None, lambda: input("  恢复该会[Y/n]: ").strip().lower()
                 )
                 if resp in ("", "y", "yes"):
                     self.conversations.load_session(sid)
@@ -1288,12 +1323,12 @@ class CLI:
 
         sid = self.conversations.resolve_session_id(args.strip())
         if not sid:
-            print(f"  未找到会？{args.strip()}（多个匹配或不存在）")
+            print(f"  未找到会{args.strip()}（多个匹配或不存在）")
             sessions = self.conversations.list_sessions(limit=5)
             if sessions:
                 print("  最近的会话:")
                 for s in sessions:
-                    print(f"    {s.session_id[:8]} ？{s.title} ({s.message_count} 条消？")
+                    print(f"    {s.session_id[:8]} {s.title} ({s.message_count} 条消息息")
             return
         if self.conversations.load_session(sid):
             info = self.conversations.get_session_info(sid)
@@ -1303,7 +1338,7 @@ class CLI:
             else:
                 print(f"  Restored session {sid[:8]}")
         else:
-            print(f"  会话不存？{sid[:8]}")
+            print(f"  会话不存{sid[:8]}")
 
     async def _fork_session(self, args: str) -> None:
         parts = args.split(maxsplit=1)
@@ -1314,7 +1349,7 @@ class CLI:
 
         sid = self.conversations.resolve_session_id(parts[0].strip())
         if not sid:
-            print(f"  未找到会？{parts[0].strip()}（多个匹配或不存在）")
+            print(f"  未找到会{parts[0].strip()}（多个匹配或不存在）")
             return
         turn_number = None
         if len(parts) > 1:
@@ -1324,7 +1359,7 @@ class CLI:
                     print("  turn_number 必须 >= 1")
                     return
             except ValueError:
-                print(f"  turn_number 必须是数？{parts[1]}")
+                print(f"  turn_number 必须是数{parts[1]}")
                 return
 
         source = self.conversations.get_session_info(sid)
@@ -1339,8 +1374,8 @@ class CLI:
         info = self.conversations.get_session_info(new_id)
         msg_count = info.message_count if info else "?"
         print(f"  Forked new session: {new_id[:8]} {title}")
-        print(f"    消息？{msg_count}")
-        print(f"    源会？{sid[:8]} (轮次: {turn_number or '全部'})")
+        print(f"    消息数: {msg_count}")
+        print(f"    源会{sid[:8]} (轮次: {turn_number or '全部'})")
 
     async def _switch_provider(self, args: str) -> None:
         if not args:
@@ -1348,18 +1383,18 @@ class CLI:
             print(f"  Base URL: {self.provider_config.base_url}")
             print(f"\n  可用 Provider:")
             for p in get_available_providers():
-                print(f"    {p['key']:20s} ？{p['display']}")
+                print(f"    {p['key']:20s} {p['display']}")
             print(f"\n  用法: /provider <类型>")
             return
 
         provider_type = parse_provider(args.strip())
         if provider_type is None:
-            print(f"  无效？rovider: {args}")
-            print(f"  可？openai_compatible, anthropic")
+            print(f"  无效rovider: {args}")
+            print(f"  可openai_compatible, anthropic")
             return
 
         if provider_type == self.provider_config.provider_type:
-            print(f"  当前已经？{PROVIDER_DISPLAY_NAMES[provider_type]}")
+            print(f"  当前已经使用 {PROVIDER_DISPLAY_NAMES[provider_type]}")
             return
 
         defaults = PROVIDER_DEFAULTS.get(provider_type.value, {})
@@ -1397,7 +1432,7 @@ class CLI:
             self.manager.max_spawn_depth,
             provider=self.provider_config.provider_type.value,
         )
-        print(f"  ？��切换到: {get_provider_display(self.provider_config)}\n")
+        print(f"  切换到: {get_provider_display(self.provider_config)}\n")
 
     def _switch_model(self, args: str) -> None:
         if args and args.strip():
@@ -1414,7 +1449,7 @@ class CLI:
                 self.manager.max_spawn_depth,
                 provider=self.provider_config.provider_type.value,
             )
-            print(f"  ？？Agent 模型已切换为: {model}\n")
+            print(f"  Agent 模型已切换为: {model}\n")
             return
 
         self._show_model_menu()
@@ -1439,10 +1474,10 @@ class CLI:
         while True:
             print(f"\n{'─'*50}")
             print(f"  📋 当前模型配置:")
-            print(f"    1. ？gent:  {self.provider_config.model}")
-            print(f"    2. ？gent:  {sub}")
+            print(f"    1. gent:  {self.provider_config.model}")
+            print(f"    2. gent:  {sub}")
             print(f"    3. 审查模型:  {rv}")
-            print(f"    4. 新增自定？rovider")
+            print(f"    4. 新增自定rovider")
             print(f"    0. 返回")
             choice = input(f"\n  请选择 (0-4): ").strip()
             if choice == "0":
@@ -1486,9 +1521,9 @@ class CLI:
         return None
 
     def _prompt_switch_main(self, sub: str, rv: str) -> None:
-        model = self._prompt_model_selection("？gent 模型",
+        model = self._prompt_model_selection("gent 模型",
                                              self.provider_config.model,
-                                             "？gent 模型", sub,
+                                             "gent 模型", sub,
                                              "审查模型", rv)
         if not model:
             return
@@ -1504,11 +1539,11 @@ class CLI:
             self.manager.max_spawn_depth,
             provider=self.provider_config.provider_type.value,
         )
-        print(f"  ？？Agent 模型已切换为: {model}")
+        print(f"  Agent 模型已切换为: {model}")
 
     def _prompt_switch_sub(self, sub: str, rv: str) -> None:
-        model = self._prompt_model_selection("？gent 模型", sub,
-                                             "？gent 模型", self.provider_config.model,
+        model = self._prompt_model_selection("gent 模型", sub,
+                                             "gent 模型", self.provider_config.model,
                                              "审查模型", rv)
         if not model:
             return
@@ -1521,15 +1556,15 @@ class CLI:
             provider=self.provider_config.provider_type.value,
             sub_model=model,
         )
-        print(f"  ？？Agent 模型已切换为: {model}")
+        print(f"  Agent 模型已切换为: {model}")
 
     def _prompt_switch_review(self, sub: str, rv: str) -> None:
         print(f"\n  当前审查模型: {rv}")
         print(f"  请选择:")
-        print(f"    1. 复用？gent 模型: {self.provider_config.model}")
-        print(f"    2. 使用？gent 模型: {sub}")
+        print(f"    1. 复用gent 模型: {self.provider_config.model}")
+        print(f"    2. 使用gent 模型: {sub}")
         print(f"    3. 输入其他模型")
-        print(f"    4. 独立配置 (自定？PI Key/URL)")
+        print(f"    4. 独立配置 (自定PI Key/URL)")
         print(f"    0. 取消")
         choice = input(f"\n  请选择 (0-4): ").strip()
         if choice == "0":
@@ -1547,7 +1582,7 @@ class CLI:
                 review_model=model,
                 review_api_key=None,
             )
-            print(f"  ？��查模型已复用主 Agent: {model}")
+            print(f"  审查模型已复用主 Agent: {model}")
         elif choice == "2":
             model = sub
             self.review_llm = create_llm(ProviderConfig(
@@ -1566,9 +1601,9 @@ class CLI:
                 review_model=model,
                 review_api_key=None,
             )
-            print(f"  ？��查模型已切换为: {model}")
+            print(f"  审查模型已切换为: {model}")
         elif choice == "3":
-            model = input(f"  输入审查模型？").strip()
+            model = input(f"  输入审查模型").strip()
             if not model:
                 return
             self.review_llm = create_llm(ProviderConfig(
@@ -1587,7 +1622,7 @@ class CLI:
                 review_model=model,
                 review_api_key=None,
             )
-            print(f"  ？��查模型已切换为: {model}")
+            print(f"  审查模型已切换为: {model}")
         elif choice == "4":
             providers = get_available_providers()
             print("\n  选择审查 Provider:")
@@ -1628,10 +1663,10 @@ class CLI:
                 review_base_url=rv_url,
                 review_provider=rv_provider.value,
             )
-            print(f"  ？��查模型已配置为独立 Provider: {rv_model}")
+            print(f"  审查模型已配置为独立 Provider: {rv_model}")
 
     def _prompt_add_provider(self) -> None:
-        print(f"\n  新增自定？rovider (将替换主 Agent 配置)")
+        print(f"\n  新增自定rovider (将替换主 Agent 配置)")
         providers = get_available_providers()
         print("  选择 Provider 类型:")
         for i, p in enumerate(providers, 1):
@@ -1669,7 +1704,7 @@ class CLI:
             self.manager.max_spawn_depth,
             provider=new_provider.value,
         )
-        print(f"  ？��切换至？rovider: {get_provider_display(self.provider_config)}\n")
+        print(f"  切换至rovider: {get_provider_display(self.provider_config)}\n")
 
     def _list_skills(self) -> None:
         skills = self.skill_registry.list_all()
@@ -1678,11 +1713,11 @@ class CLI:
             print("  /skills install <repo_url> [--skill <name>] [--global] — 安装技能")
             print("  /skills find <描述> — 搜索技能")
             return
-        print("\n已注册的技？")
+        print("\n已注册的技")
         for s in skills:
-            detail = s.description or "无描？"
+            detail = s.description or "无描"
 
-            print(f"  📦 {s.name} ？{detail}")
+            print(f"  📦 {s.name} {detail}")
         print()
 
     async def _install_skill(self, args: str) -> None:
@@ -1698,7 +1733,7 @@ class CLI:
         import shutil
         npx = shutil.which("npx")
         if not npx:
-            print("？��找？px，请先安？ode.js (https://nodejs.org)")
+            print("找px，请先安ode.js (https://nodejs.org)")
             return
         cmd = f"npx skills add {' '.join(parts)}"
         print(f"📦 执行: {cmd}")
@@ -1715,28 +1750,28 @@ class CLI:
                 skills_dir = GOAT_HOME / "skills" if use_global else get_skills_dir()
                 skills_dir.mkdir(parents=True, exist_ok=True)
                 self.skill_registry.load_skills_from_directory(skills_dir)
-                scope = "全局" if use_global else "本项？"
+                scope = "全局" if use_global else "本项"
 
-                print(f"？��装成功 ({scope})\n{out}")
+                print(f"装成功 ({scope})\n{out}")
             else:
-                print(f"？��装失败 (exit {proc.returncode})\n{err or out}")
+                print(f"装失败 (exit {proc.returncode})\n{err or out}")
         except asyncio.TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            print("？��装超时 (120s)")
+            print("装超时 (120s)")
         except Exception as e:
             try:
                 proc.kill()
             except (ProcessLookupError, UnboundLocalError):
                 pass
-            print(f"？��装出错: {e}")
+            print(f"安装出错: {e}")
 
     def _list_roles(self) -> None:
         print("\n可用角色类型:")
         for role_def in list_roles():
-            spawn = "？？spawn" if role_def.can_spawn else "？��可 spawn"
+            spawn = "spawn" if role_def.can_spawn else "可 spawn"
             tools_str = ", ".join(role_def.allowed_tools[:5])
             if len(role_def.allowed_tools) > 5:
                 tools_str += f" ... 等{len(role_def.allowed_tools)}种"
@@ -1756,7 +1791,7 @@ class CLI:
         for s in sessions:
             marker = " ◀ 当前" if s.session_id == current else ""
             created = s.created_at[:19].replace("T", " ")
-            print(f"  {s.session_id[:8]} | {s.title[:30]:30s} | {s.message_count:3d} 条消？ {created}{marker}")
+            print(f"  {s.session_id[:8]} | {s.title[:30]:30s} | {s.message_count:3d} 条消息息 {created}{marker}")
         print()
 
     def _switch_session(self, session_id: str) -> None:
@@ -1765,12 +1800,12 @@ class CLI:
             sessions = self.conversations.list_sessions()
             if sessions:
                 for s in sessions:
-                    print(f"  {s.session_id[:8]} ？{s.title} ({s.message_count} 条消？")
+                    print(f"  {s.session_id[:8]} {s.title} ({s.message_count} 条消息息")
             return
 
         sid = self.conversations.resolve_session_id(session_id)
         if not sid:
-            print(f"未找到会？{session_id}（多个匹配或不存在）")
+            print(f"未找到会{session_id}（多个匹配或不存在）")
             return
         if self.conversations.load_session(sid):
             self.conversations.clear_checkpoint()
@@ -1778,7 +1813,7 @@ class CLI:
             matched = [s for s in info if s.session_id == sid]
             if matched:
                 s = matched[0]
-                print(f"已切换到会话: {s.title} ({s.message_count} 条消息 {s.token_count} tokens)")
+                print(f"已切换到会话: {s.title} ({s.message_count} 条消息息 {s.token_count} tokens)")
         else:
             print(f"会话不存在 {session_id}")
 
@@ -1796,7 +1831,7 @@ class CLI:
 
     async def _submit_task(self, raw: str) -> None:
         if not raw:
-            print("用法: /task <任务？[描述] [metadata:{...}]")
+            print("用法: /task <任务[描述] [metadata:{...}]")
             print(f"可用任务类型: explore, batch_run")
             return
 
@@ -1822,9 +1857,9 @@ class CLI:
         )
 
         if err:
-            print(f"？{err}")
+            print(f"{err}")
         else:
-            print(f"？��务已提？{task_id}")
+            print(f"任务已提交 {task_id}")
             print(f"   名称: {task_name} | 描述: {description[:60]}")
 
     def _list_tasks(self, status_filter: str) -> None:
@@ -1833,7 +1868,7 @@ class CLI:
                 st = TaskStatus(status_filter)
                 tasks = self.task_manager.list_tasks(status=st.value)
             except ValueError:
-                print(f"无效的状？{status_filter}，可？pending, running, completed, failed, cancelled, paused")
+                print(f"无效的状{status_filter}，可pending, running, completed, failed, cancelled, paused")
                 return
         else:
             tasks = self.task_manager.list_tasks(limit=50)
@@ -1897,21 +1932,21 @@ class CLI:
         print(f"  SubAgent Session: {self.manager.session_boot_id}")
         print(f"  并发上限: {self.manager.max_concurrent}")
         print(f"  深度上限: {self.manager.max_spawn_depth}")
-        print(f"  ？gent 总数: {len(agents)}")
-        print(f"    运行？{running}")
-        print(f"    已完？{completed}")
+        print(f"  gent 总数: {len(agents)}")
+        print(f"    运行{running}")
+        print(f"    已完成 {completed}")
         print(f"    失败: {failed}")
-        print(f"    已取？{cancelled}")
+        print(f"    已取消 {cancelled}")
         print()
 
         if self.conversations:
             token_info = self.conversations.get_token_usage()
-            current = self.conversations.current_session_id or "(？"
+            current = self.conversations.current_session_id or "("
 
             print(f"  对话系统:")
             print(f"    当前会话: {current[:8]}")
             print(f"    总会话数: {len(self.conversations.list_sessions(limit=9999))}")
-            print(f"    当前消息？{token_info['message_count']}")
+            print(f"    当前消息数: {token_info['message_count']}")
             print(f"    当前 Tokens: {token_info['total_tokens']} / {token_info['max_tokens']}")
             print()
 
@@ -1929,16 +1964,16 @@ class CLI:
 
         checkpoint = self.conversations.get_last_checkpoint()
         if checkpoint:
-            print(f"  断点: {checkpoint['title']} ({checkpoint['message_count']} 条消？")
+            print(f"  断点: {checkpoint['title']} ({checkpoint['message_count']} 条消息")
             print()
 
         if self.task_manager:
             running = self.task_manager.running_count
             pending = self.task_manager.pending_count
             total = len(self.task_manager.list_tasks(limit=9999))
-            print(f"  后台任务管理？")
+            print(f"  后台任务管理")
             print(f"    Workers: {self.task_manager.worker_count}")
-            print(f"    运行？{running} | 排队？{pending} | 总计: {total}")
+            print(f"    运行{running} | 排队{pending} | 总计: {total}")
             print()
 
     async def _cleanup(self) -> None:
@@ -1968,10 +2003,10 @@ def _format_tool_detail(name: str, args: dict) -> str:
     if name in ("write_file", "edit_file", "write") and args.get("content"):
         content = args["content"]
         preview = content[:200].replace("\n", "\\n")
-        lines.append(f"    改什？{preview}")
+        lines.append(f"    改什{preview}")
     elif name in ("edit_file",) and args.get("new_str"):
         preview = args["new_str"][:200].replace("\n", "\\n")
-        lines.append(f"    改什？{preview}")
+        lines.append(f"    改什{preview}")
     elif name in ("execute_command", "Bash", "shell") and args.get("command"):
         cmd = args["command"]
         lines.append(f"    命令: {cmd[:200]}")
@@ -1989,7 +2024,7 @@ def _mcp_add_from_cli(payload: str):
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
-        print("错误: JSON 解析失败，请检查粘贴内？")
+        print("错误: JSON 解析失败，请检查粘贴内")
         return
 
     servers = data.get("mcpServers", data)
@@ -2002,7 +2037,7 @@ def _mcp_add_from_cli(payload: str):
     connections = []
     for name, server_def in servers.items():
         if not isinstance(server_def, dict):
-            print(f"错误: 服务？{name}] 配置格式错误")
+            print(f"错误: 服务{name}] 配置格式错误")
             return
         connections.append(McpServerConnection(
             name=name,
@@ -2024,17 +2059,17 @@ def _mcp_add_from_cli(payload: str):
     names = ", ".join(c.name for c in connections)
     print(f"MCP 服务器已接入: {names}")
     print(f"配置文件: {path}")
-    print("下次启动 TUI 或运？goat mcp connect' 即可使用")
+    print("下次启动 TUI 或运goat mcp connect' 即可使用")
 
 
 def _run_mcp_command(args: list[str]):
     if not args:
         print("用法: goat mcp <serve|serve-sse|connect|list|add>")
-        print("  serve      启动 stdio MCP 服务？？laude Desktop / Cursor 等连？")
-        print("  serve-sse  启动 SSE/HTTP MCP 服务？")
-        print("  connect    连接配置？CP 服务器并注入工具")
+        print("  serve      启动 stdio MCP 服务laude Desktop / Cursor 等连")
+        print("  serve-sse  启动 SSE/HTTP MCP 服务")
+        print("  connect    连接配置CP 服务器并注入工具")
         print("  list       列出已配置的 MCP 连接")
-        print("  add        快捷添加 MCP 服务？？goat mcp add '<标准 mcpServers JSON>'")
+        print("  add        快捷添加 MCP 服务goat mcp add '<标准 mcpServers JSON>'")
         return
 
     subcmd = args[0]
@@ -2065,7 +2100,7 @@ def _run_mcp_command(args: list[str]):
             print("No MCP connections configured. Please check goat/mcp_config.json")
             return
         tools = asyncio.run(connect_mcp_servers(config.connections))
-        print(f"已连？{len(tools)} ？CP 工具")
+        print(f"已连{len(tools)} CP 工具")
         for t in tools:
             print(f"  - {t.name}: {t.description[:80]}")
     elif subcmd == "list":
@@ -2082,11 +2117,11 @@ def _run_mcp_command(args: list[str]):
     elif subcmd == "add":
         if len(args) < 2:
             print("用法: goat mcp add '<标准 mcpServers JSON>'")
-            print('  ？goat mcp add \'{"My Server": {"command": "npx", "args": ["-y", "package"]}}\'')
+            print('  goat mcp add \'{"My Server": {"command": "npx", "args": ["-y", "package"]}}\'')
             return
         _mcp_add_from_cli(args[1])
     else:
-        print(f"未知子命？{subcmd}")
+        print(f"未知子命{subcmd}")
         print("可用: serve, serve-sse, connect, list, add")
 
 

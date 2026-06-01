@@ -192,9 +192,9 @@ class RuleEngine:
 
 class SandboxManager:
 
-    def __init__(self, level: SandboxLevel = SandboxLevel.WORKSPACE_WRITE):
+    def __init__(self, level: SandboxLevel = SandboxLevel.WORKSPACE_WRITE, workspace: str | None = None):
         self.level = level
-        self.workspace = os.getcwd()
+        self.workspace = workspace or os.getcwd()
         self.trusted_dirs: set[str] = set()
         self.trusted_dirs.add(self.workspace)
         self.trusted_dirs.add(os.path.abspath(os.sep + 'tmp') if os.name != 'nt' else os.path.abspath(os.environ.get('TEMP', os.sep + 'tmp')))
@@ -363,6 +363,21 @@ class SafetyGuard:
                     message=f"Shell 配置 '{path}' 受安全守卫保护",
                     bypass_immune=True
                 )
+        return None
+
+    @classmethod
+    def check_workspace_boundary(cls, target_path: str, workspace: str | None) -> PermissionResult | None:
+        if not target_path or not workspace:
+            return None
+        abs_target = os.path.abspath(os.path.expanduser(target_path))
+        abs_workspace = os.path.abspath(os.path.expanduser(workspace))
+        if not abs_target.startswith(abs_workspace):
+            return PermissionResult(
+                decision=Decision.ASK,
+                source='workspace_boundary',
+                message=f"文件操作位于工作空间之外: {target_path}\n路径: {abs_target}\n工作空间: {abs_workspace}\n是否允许？",
+                bypass_immune=True,
+            )
         return None
 
     @classmethod
@@ -560,6 +575,12 @@ class ApprovalPipeline:
         cmd_result = SafetyGuard.check_command(tool_call.command)
         if cmd_result:
             update_decision(cmd_result)
+
+        workspace_boundary_result = SafetyGuard.check_workspace_boundary(
+            tool_call.target_path, self.sandbox.workspace,
+        )
+        if workspace_boundary_result:
+            update_decision(workspace_boundary_result)
 
         hook_result = await self.hooks.execute(HookEvent.TOOL_CALL_BEFORE, {
             'tool_call': tool_call,
@@ -881,9 +902,9 @@ class ProfileManager:
 
 class ToolApprovalSystem:
 
-    def __init__(self):
+    def __init__(self, workspace: str | None = None):
         self.rule_engine = RuleEngine()
-        self.sandbox = SandboxManager()
+        self.sandbox = SandboxManager(workspace=workspace)
         self.classifier = MLClassifier()
         self.hooks = HookEngine()
         self.pipeline = ApprovalPipeline(

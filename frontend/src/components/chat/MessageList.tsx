@@ -6,6 +6,7 @@ import AssistantMessage from './AssistantMessage'
 import SystemMessage from './SystemMessage'
 import ErrorMessage from './ErrorMessage'
 import StreamingBubble from './StreamingBubble'
+import ToolCallCard from './ToolCallCard'
 
 export default function MessageList() {
   const activeState = useChatStore((s) => s.getActiveState())
@@ -35,7 +36,12 @@ export default function MessageList() {
             {msg.role === 'user' ? (
               <UserMessage content={msg.content} />
             ) : msg.role === 'assistant' ? (
-              <AssistantMessage content={msg.content} />
+              <>
+                {msg.toolCalls?.map((tc, i) => (
+                  <ToolCallCard key={i} toolCall={tc} />
+                ))}
+                <AssistantMessage content={msg.content} />
+              </>
             ) : msg.role === 'system' ? (
               <SystemMessage content={msg.content} />
             ) : (
@@ -44,7 +50,7 @@ export default function MessageList() {
           </div>
         )
       })}
-      {isStreaming && streamingContent && (
+      {isStreaming && (
         <StreamingBubble content={streamingContent} />
       )}
     </div>

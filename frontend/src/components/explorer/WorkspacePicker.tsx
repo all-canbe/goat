@@ -5,7 +5,7 @@ import { useConfigStore } from '@/stores/configStore'
 interface WorkspacePickerProps {
   isOpen: boolean
   onClose: () => void
-  onSuccess?: () => void
+  onSuccess?: (path: string) => void
 }
 
 export default function WorkspacePicker({ isOpen, onClose, onSuccess }: WorkspacePickerProps) {
@@ -21,9 +21,10 @@ export default function WorkspacePicker({ isOpen, onClose, onSuccess }: Workspac
     setError('')
     setLoading(true)
     try {
-      const ok = await setWorkspace(inputValue.trim())
+      const path = inputValue.trim()
+      const ok = await setWorkspace(path)
       if (ok) {
-        onSuccess?.()
+        onSuccess?.(path)
         onClose()
       } else {
         setError('修改失败，请检查路径是否正确')

@@ -42,23 +42,34 @@ export default function InputPanel() {
     if (!trimmed && attachments.length === 0) return
     if (isStreaming) return
 
-    const wsClient = (window as any).__wsClient
-    if (!wsClient) return
-
     let finalText = trimmed
     if (attachments.length > 0) {
-      const filesPart = attachments.map(a => `📄 ${a.path}`).join('\n')
+      const filesPart = attachments.map(a => `📄 \`${a.path}\``).join('\n')
       finalText = trimmed ? `${trimmed}\n${filesPart}` : filesPart
     }
 
-    wsClient.send('chat.send', { text: finalText, sessionId })
-
-    useChatStore.getState().addMessage(sessionId, {
+    const store = useChatStore.getState()
+    store.clearStream(sessionId)
+    store.addMessage(sessionId, {
       id: crypto.randomUUID(),
       role: 'user',
       content: finalText,
       timestamp: Date.now(),
     })
+    store.appendStreamToken(sessionId, '')
+
+    const wsClient = (window as any).__wsClient
+    if (wsClient) {
+      wsClient.send('chat.send', { text: finalText, sessionId })
+    } else {
+      store.addMessage(sessionId, {
+        id: crypto.randomUUID(),
+        role: 'error',
+        content: 'WebSocket 连接未就绪，请刷新页面重试',
+        timestamp: Date.now(),
+      })
+      store.clearStream(sessionId)
+    }
 
     setText('')
     setAttachments([])
@@ -88,8 +99,9 @@ export default function InputPanel() {
   }, [])
 
   const handleCancel = () => {
+    const sessionId = activeSessionId || 'default'
     const wsClient = (window as any).__wsClient
-    if (wsClient) wsClient.send('chat.cancel', {})
+    if (wsClient) wsClient.send('chat.cancel', { sessionId })
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

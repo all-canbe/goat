@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-沙箱功能测试脚本 -- 验证各平台沙箱是否正常工�?
+沙箱功能测试脚本 -- 验证各平台沙箱是否正常工?
 运行方式:
-    python test_sandbox.py                          # 运行所有测�?    python test_sandbox.py windows                   # �?Windows 沙箱测试
+    python test_sandbox.py                          # 运行所有测?    python test_sandbox.py windows                   # ?Windows 沙箱测试
     python test_sandbox.py async_executor            # 仅异步执行器测试
-    python test_sandbox.py integration               # 仅集成测�?
-测试�?
+    python test_sandbox.py integration               # 仅集成测?
+测试?
     1. 沙箱创建工厂 -- 验证 create_sandbox() 返回正确平台实例
-    2. 沙箱执行 -- 验证沙箱能正常执行命�?    3. 沙箱终止 -- 验证 terminate() 能杀死进�?    4. 超时机制 -- 验证超时后能正确终止
-    5. 异步执行�?-- 验证 stdout/stderr 回调能收到输�?    6. 集成测试 -- 验证 async_execute_command 走沙箱路�?    7. 沙箱限制验证 (Windows) -- Job Object 能否限制子进�?    8. EventBus 工具事件 -- 验证 TOOL_STDOUT/STDERR 事件发布
+    2. 沙箱执行 -- 验证沙箱能正常执行命?    3. 沙箱终止 -- 验证 terminate() 能杀死进?    4. 超时机制 -- 验证超时后能正确终止
+    5. 异步执行?-- 验证 stdout/stderr 回调能收到输?    6. 集成测试 -- 验证 async_execute_command 走沙箱路?    7. 沙箱限制验证 (Windows) -- Job Object 能否限制子进?    8. EventBus 工具事件 -- 验证 TOOL_STDOUT/STDERR 事件发布
 """
 
 import asyncio
@@ -55,7 +55,7 @@ def test_sandbox_factory():
            status.get("type") == expected_type,
            f"期望 {expected_type}, 实际 {status.get('type')}")
 
-    print(f"  沙箱状�? {status}")
+    print(f"  沙箱状? {status}")
 
 
 # ============================================================
@@ -136,19 +136,19 @@ async def test_sandbox_timeout():
     result = await sandbox.run(long_cmd, timeout=3)
     elapsed = time.time() - start
 
-    _check("超时后返回码�?-1", result.returncode == -1,
+    _check("超时后返回码?-1", result.returncode == -1,
            f"returncode: {result.returncode}")
-    _check("超时�?terminated �?True", result.terminated,
+    _check("超时?terminated ?True", result.terminated,
            f"terminated: {result.terminated}")
     _check(f"实际耗时 ({elapsed:.1f}s) 小于 10s", elapsed < 10,
            f"耗时 {elapsed:.1f}s，可能超时机制失效")
 
 
 # ============================================================
-# 5. 异步执行器测�?# ============================================================
+# 5. 异步执行器测?# ============================================================
 
 async def test_async_executor():
-    print("\n=== 5. 异步执行器测�?===")
+    print("\n=== 5. 异步执行器测?===")
     from goat.tools.async_executor import execute_command_async
 
     stdout_lines = []
@@ -203,13 +203,13 @@ async def test_integration():
     result_blocked = await async_execute_command.ainvoke({
         "command": "sudo echo test",
     })
-    _check("黑名单阻�?sudo", "安全拒绝" in result_blocked,
+    _check("黑名单阻?sudo", "安全拒绝" in result_blocked,
            f"实际: {result_blocked[:100]}")
 
     result_escape = await async_execute_command.ainvoke({
         "command": "cd /etc && ls",
     })
-    _check("逃逸检测阻�?cd /etc", "安全拒绝" in result_escape,
+    _check("逃逸检测阻?cd /etc", "安全拒绝" in result_escape,
            f"实际: {result_escape[:100]}")
 
     if sys.platform == "win32":
@@ -224,7 +224,7 @@ async def test_integration():
 
 
 # ============================================================
-# 7. Windows Job Object 限制验证 (�?Windows)
+# 7. Windows Job Object 限制验证 (?Windows)
 # ============================================================
 
 async def test_windows_job_limits():

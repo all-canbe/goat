@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from .retry import retry_sync, RetryConfig
 
+_exec_workspace: str | None = None
+
 _RETRYABLE_NET = RetryConfig(
     max_retries=3,
     base_delay=1.0,
@@ -38,7 +40,10 @@ _RETRYABLE_NET = RetryConfig(
 # ============================================================================
 
 def _safe_path(path: str) -> Path:
-    return Path(path).expanduser().resolve()
+    p = Path(path).expanduser()
+    if not p.is_absolute() and _exec_workspace is not None:
+        return (Path(_exec_workspace) / p).resolve()
+    return p.resolve()
 
 
 def _detect_subprocess_encoding() -> str:
@@ -111,7 +116,7 @@ def _format_command_error(cmd: str, error: str, returncode: int | None = None) -
 def _get_windows_error_hints(cmd: str) -> str:
     hints = []
     if cmd.startswith("mkdir ") and "-p" in cmd:
-        hints.append("Windows �?mkdir 不支�?-p 参数，改�? " + cmd.replace("-p ", ""))
+        hints.append("Windows ?mkdir 不支?-p 参数，改? " + cmd.replace("-p ", ""))
     if cmd.startswith("ls ") or cmd == "ls":
         hints.append("Windows 使用 dir 代替 ls")
     if cmd.startswith("cat ") or cmd == "cat":
@@ -158,14 +163,14 @@ def _normalize_smart_quotes(text: str) -> str:
 
 
 # ============================================================================
-# 命令安全：黑名单 + 逃逸检�?+ 环境变量过滤 (严格模式)
+# 命令安全：黑名单 + 逃逸检?+ 环境变量过滤 (严格模式)
 # ============================================================================
 
 # 严格模式黑名单：匹配即拒绝，YOLO 模式也不可绕过
 COMMAND_BLACKLIST: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'\brm\s+(-rf?|--recursive)\s+[/~]'), "禁止递归删除根目�?/ 或家目录 ~"),
+    (re.compile(r'\brm\s+(-rf?|--recursive)\s+[/~]'), "禁止递归删除根目?/ 或家目录 ~"),
     (re.compile(r'\bsudo\b'), "禁止使用 sudo（权限提升）"),
-    (re.compile(r'\bdd\s+(if=|of=)'), "禁止直接块设备读�?(dd)"),
+    (re.compile(r'\bdd\s+(if=|of=)'), "禁止直接块设备读?(dd)"),
     (re.compile(r'\bchmod\s+(-R\s+)?777\b'), "禁止设置或递归设置 777 权限"),
     (re.compile(r'\bchown\b'), "禁止变更文件所有者"),
     (re.compile(r':\(\)\s*\{'), "禁止 fork 炸弹"),
@@ -173,7 +178,7 @@ COMMAND_BLACKLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\bfdisk\b'), "禁止分区操作"),
     (re.compile(r'\bformat\b'), "禁止格式化操作"),
     (re.compile(r'\bdiskpart\b'), "禁止磁盘分区操作"),
-    (re.compile(r'\b(wget|curl)\s+.*[\|;]\s*(bash|sh|zsh|pwsh|powershell)\b'), "禁止远程脚本管道�?shell 执行"),
+    (re.compile(r'\b(wget|curl)\s+.*[\|;]\s*(bash|sh|zsh|pwsh|powershell)\b'), "禁止远程脚本管道?shell 执行"),
     (re.compile(r'\b(wget|curl)\s+.*-O\s+[/\\]'), "禁止下载文件到根目录"),
     (re.compile(r'>\s*[/\\]dev[/\\](sda|sdb|sdc|nvme|mmc)'), "禁止直接写入块设备文件"),
     (re.compile(r'\b(mount|umount)\b'), "禁止挂载/卸载文件系统"),
@@ -184,7 +189,7 @@ COMMAND_BLACKLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\bdoas\b'), "禁止权限提升 (doas)"),
 ]
 
-# 严格模式白名单：非白名单命令�?Plan 模式下被阻止
+# 严格模式白名单：非白名单命令?Plan 模式下被阻止
 PLAN_MODE_ALLOWED_COMMANDS: set[str] = {
     "ls", "cat", "head", "tail", "wc", "grep", "find", "echo",
     "pwd", "which", "whoami", "id", "date", "uname", "type", "dir",
@@ -221,7 +226,7 @@ def _detect_escape_attempt(command: str) -> Optional[str]:
     for pattern, reason in cd_patterns:
         if re.search(pattern, command):
             return (
-                f"安全拒绝: 工作目录逃�?- {reason}\n"
+                f"安全拒绝: 工作目录逃?- {reason}\n"
                 f"命令: {command[:200]}"
             )
     return None
@@ -270,7 +275,7 @@ def _try_split_command(command: str) -> Optional[list[str]]:
 
 @tool
 def list_files(directory: str = ".", pattern: str = "*", recursive: bool = False) -> str:
-    """列出目录中的文件和子目录�?
+    """列出目录中的文件和子目录?
     Args:
         directory: 要列出的目录路径，默认为当前目录
         pattern: glob 匹配模式，默认为 *
@@ -278,7 +283,7 @@ def list_files(directory: str = ".", pattern: str = "*", recursive: bool = False
     """
     p = _safe_path(directory)
     if not p.exists():
-        return f"错误: 目录不存�? {directory}"
+        return f"错误: 目录不存? {directory}"
     if not p.is_dir():
         return f"错误: 不是目录: {directory}"
 
@@ -300,22 +305,22 @@ def list_files(directory: str = ".", pattern: str = "*", recursive: bool = False
         results.append(f"{prefix} {rel}{size}")
 
     if not results:
-        return f"目录为空或没有匹�? {directory}/{pattern}"
-    summary = f"--- {directory} ({'递归' if recursive else '仅当前层'}) �?{len(results)} �?---\n"
+        return f"目录为空或没有匹? {directory}/{pattern}"
+    summary = f"--- {directory} ({'递归' if recursive else '仅当前层'}) ?{len(results)} ?---\n"
     return summary + "\n".join(results)
 
 
 @tool
 def read_file(filepath: str, start_line: int = 1, end_line: int = -1) -> str:
-    """读取文件内容�?
+    """读取文件内容?
     Args:
         filepath: 文件路径
-        start_line: 起始行号 (1-based)，默�?1
-        end_line: 结束行号 (1-based)�?1 表示读到末尾
+        start_line: 起始行号 (1-based)，默?1
+        end_line: 结束行号 (1-based)?1 表示读到末尾
     """
     p = _safe_path(filepath)
     if not p.exists():
-        return f"错误: 文件不存�? {filepath}"
+        return f"错误: 文件不存? {filepath}"
     if not p.is_file():
         return f"错误: 不是文件: {filepath}"
 
@@ -338,13 +343,13 @@ def read_file(filepath: str, start_line: int = 1, end_line: int = -1) -> str:
     end_line = min(total, end_line)
 
     selected = lines[start_line - 1: end_line]
-    header = f"--- {filepath} (�?{start_line}-{end_line} / �?{total} �? ---"
+    header = f"--- {filepath} (?{start_line}-{end_line} / ?{total} ? ---"
     return header + "\n" + "\n".join(selected)
 
 
 @tool
 def write_file(filepath: str, content: str) -> str:
-    """写入内容到文件（覆盖模式）�?
+    """写入内容到文件（覆盖模式）?
     Args:
         filepath: 文件路径
         content: 要写入的内容
@@ -359,13 +364,13 @@ def write_file(filepath: str, content: str) -> str:
 
 @tool
 def delete_file(filepath: str, recursive: bool = False) -> str:
-    """删除文件或目录�?
+    """删除文件或目录?
     Args:
-        filepath: 要删除的文件或目录路�?        recursive: 如果目标是目录，是否递归删除，默�?False
+        filepath: 要删除的文件或目录路?        recursive: 如果目标是目录，是否递归删除，默?False
     """
     p = _safe_path(filepath)
     if not p.exists():
-        return f"错误: 路径不存�? {filepath}"
+        return f"错误: 路径不存? {filepath}"
 
     try:
         if p.is_dir():
@@ -373,19 +378,19 @@ def delete_file(filepath: str, recursive: bool = False) -> str:
                 shutil.rmtree(p)
                 return f"已递归删除目录: {filepath}"
             else:
-                return f"错误: '{filepath}' 是目录，请设�?recursive=True 来递归删除"
+                return f"错误: '{filepath}' 是目录，请设?recursive=True 来递归删除"
         else:
             p.unlink()
-            return f"已删除文�? {filepath}"
+            return f"已删除文? {filepath}"
     except Exception as e:
         return f"错误: 删除失败: {e}"
 
 
 @tool
 def move_file(source: str, destination: str) -> str:
-    """移动或重命名文件/目录�?
+    """移动或重命名文件/目录?
     Args:
-        source: 源路�?        destination: 目标路径
+        source: 源路?        destination: 目标路径
     """
     src = _safe_path(source)
     dst = _safe_path(destination)
@@ -396,16 +401,16 @@ def move_file(source: str, destination: str) -> str:
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
-        return f"已移�? {source} -> {destination}"
+        return f"已移? {source} -> {destination}"
     except Exception as e:
         return f"错误: 移动失败: {e}"
 
 
 @tool
 def copy_file(source: str, destination: str) -> str:
-    """复制文件或目录�?
+    """复制文件或目录?
     Args:
-        source: 源路�?        destination: 目标路径
+        source: 源路?        destination: 目标路径
     """
     src = _safe_path(source)
     dst = _safe_path(destination)
@@ -417,22 +422,22 @@ def copy_file(source: str, destination: str) -> str:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
             shutil.copytree(src, dst, dirs_exist_ok=True)
-            return f"已复制目�? {source} -> {destination}"
+            return f"已复制目? {source} -> {destination}"
         else:
             shutil.copy2(src, dst)
-            return f"已复制文�? {source} -> {destination}"
+            return f"已复制文? {source} -> {destination}"
     except Exception as e:
         return f"错误: 复制失败: {e}"
 
 
 @tool
 def get_file_info(filepath: str) -> str:
-    """获取文件或目录的详细信息�?
+    """获取文件或目录的详细信息?
     Args:
-        filepath: 文件或目录路�?    """
+        filepath: 文件或目录路?    """
     p = _safe_path(filepath)
     if not p.exists():
-        return f"错误: 路径不存�? {filepath}"
+        return f"错误: 路径不存? {filepath}"
 
     try:
         stat_info = p.stat()
@@ -454,16 +459,16 @@ def get_file_info(filepath: str) -> str:
 
 @tool
 def glob_search(pattern: str, directory: str = ".", max_results: int = 200) -> str:
-    """使用 glob 模式搜索文件�?
-    类似 Claude Code �?Glob 工具�?Codex CLI �?glob 功能�?    根据 pattern 搜索文件名，支持通配符�?
+    """使用 glob 模式搜索文件?
+    类似 Claude Code ?Glob 工具?Codex CLI ?glob 功能?    根据 pattern 搜索文件名，支持通配符?
     Args:
         pattern: glob 搜索模式，如 "**/*.py", "src/**/*.ts"
         directory: 搜索的根目录，默认为当前目录
-        max_results: 最大返回结果数，默�?200
+        max_results: 最大返回结果数，默?200
     """
     p = _safe_path(directory)
     if not p.exists():
-        return f"错误: 目录不存�? {directory}"
+        return f"错误: 目录不存? {directory}"
 
     try:
         results = []
@@ -474,16 +479,16 @@ def glob_search(pattern: str, directory: str = ".", max_results: int = 200) -> s
                     break
 
         if not results:
-            return f"未找到匹�? {directory}/{pattern}"
+            return f"未找到匹? {directory}/{pattern}"
 
-        summary = f"--- 匹配结果 ({len(results)} �? 显示�?{min(len(results), max_results)} �? ---\n"
+        summary = f"--- 匹配结果 ({len(results)} ? 显示?{min(len(results), max_results)} ? ---\n"
         return summary + "\n".join(results)
     except Exception as e:
         return f"错误: 搜索失败: {e}"
 
 
 # ============================================================================
-# 2. FileEditTool �?SearchReplace 精确编辑
+# 2. FileEditTool ?SearchReplace 精确编辑
 # ============================================================================
 
 class FileEditInput(BaseModel):
@@ -498,29 +503,29 @@ class FileEditInput(BaseModel):
     )
     partial: bool = Field(
         default=False,
-        description="如果�?True，old_string 只需是匹配内容的子串，不要求完全匹配"
+        description="如果?True，old_string 只需是匹配内容的子串，不要求完全匹配"
     )
     fuzz: bool = Field(
         default=False,
-        description="如果�?True，容忍前导空白差异和智能引号变体"
+        description="如果?True，容忍前导空白差异和智能引号变体"
     )
 
 
 class FileEditTool(BaseTool):
-    """Search-and-Replace 文件编辑器�?
-    类似�?Claude Code �?Edit 工具、DeepSeek TUI �?edit_file 工具�?    通过内容而非行号精确定位代码，确�?old_string 唯一匹配�?
-    特�?
+    """Search-and-Replace 文件编辑器?
+    类似?Claude Code ?Edit 工具、DeepSeek TUI ?edit_file 工具?    通过内容而非行号精确定位代码，确?old_string 唯一匹配?
+    特?
     - exact 模式: old_string 必须完全且唯一匹配
-    - partial 模式: old_string 可作为子串匹�?    - fuzz 模式: 容忍缩进差异和智能引�?    - 自动生成 diff 输出
+    - partial 模式: old_string 可作为子串匹?    - fuzz 模式: 容忍缩进差异和智能引?    - 自动生成 diff 输出
     - 多层安全校验
     """
     name: str = "file_edit"
-    description: str = """通过内容搜索替换编辑文件 - 类似 Claude Code �?Edit�?
-精确匹配 old_string 并替换为 new_string，适用于修改已有文件的特定部分�?old_string 必须在文件中唯一出现。创建新文件请用 write_file�?
+    description: str = """通过内容搜索替换编辑文件 - 类似 Claude Code ?Edit?
+精确匹配 old_string 并替换为 new_string，适用于修改已有文件的特定部分?old_string 必须在文件中唯一出现。创建新文件请用 write_file?
 示例:
   - 修改函数: old_string="def old_name():" new_string="def new_name():"
   - 修复拼写: old_string="teh" new_string="the"
-  - 删除一�? old_string="print('debug')\\n" new_string=""
+  - 删除一? old_string="print('debug')\\n" new_string=""
 """
     args_schema: Type[BaseModel] = FileEditInput
     return_direct: bool = False
@@ -528,12 +533,12 @@ class FileEditTool(BaseTool):
     @staticmethod
     def _check_safety(file_path: str, old_string: str, new_string: str) -> Optional[str]:
         if old_string == new_string and new_string:
-            return "错误: old_string �?new_string 完全相同，无需修改"
+            return "错误: old_string ?new_string 完全相同，无需修改"
 
         protected_patterns = [r'\.git/', r'\.ssh/', r'node_modules/']
         for pattern in protected_patterns:
             if re.search(pattern, file_path):
-                return f"错误: 不允许编辑受保护的路�? {file_path}"
+                return f"错误: 不允许编辑受保护的路? {file_path}"
         return None
 
     def _try_fuzzy_match(self, content: str, old_string: str) -> Optional[tuple[int, int, str]]:
@@ -570,7 +575,7 @@ class FileEditTool(BaseTool):
             return safety_error
 
         if not os.path.isfile(file_path):
-            return f"错误: 文件不存�? {file_path}"
+            return f"错误: 文件不存? {file_path}"
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -593,7 +598,7 @@ class FileEditTool(BaseTool):
                 else:
                     return f"错误: 在 {file_path} 中未找到匹配文本（含模糊匹配）"
             else:
-                return f"错误: �?{file_path} 中未找到匹配文本"
+                return f"错误: ?{file_path} 中未找到匹配文本"
         else:
             count = content.count(old_string_to_match)
             if count == 0:
@@ -604,10 +609,10 @@ class FileEditTool(BaseTool):
                         new_content = content[:start] + new_string + content[end:]
                         diff = _build_diff(file_path, content, new_content)
                         return (
-                            f"已编�?{os.path.basename(file_path)} (模糊匹配)\n"
+                            f"已编?{os.path.basename(file_path)} (模糊匹配)\n"
                             f"匹配: {repr(matched_text[:80])}\n{diff}"
                         )
-                return f"错误: �?{file_path} 中未找到匹配文本"
+                return f"错误: ?{file_path} 中未找到匹配文本"
 
             if count > 1:
                 return (
@@ -629,7 +634,7 @@ class FileEditTool(BaseTool):
         direction = "删除" if lines_changed > 0 else "增加"
 
         return (
-            f"已编�?{os.path.basename(file_path)}: "
+            f"已编?{os.path.basename(file_path)}: "
             f"{abs(lines_changed)} {line_word} {direction}\n{diff}"
         )
 
@@ -639,7 +644,7 @@ class FileEditTool(BaseTool):
 
 
 # ============================================================================
-# 3. FileGrepTool �?文件内容搜索 (ripgrep / Python fallback)
+# 3. FileGrepTool ?文件内容搜索 (ripgrep / Python fallback)
 # ============================================================================
 
 class FileGrepInput(BaseModel):
@@ -648,7 +653,7 @@ class FileGrepInput(BaseModel):
     )
     path: str = Field(
         default=".",
-        description="要搜索的目录或文件路径，默认为当前目�?"
+        description="要搜索的目录或文件路径，默认为当前目?"
     )
     glob: Optional[str] = Field(
         default=None,
@@ -656,13 +661,13 @@ class FileGrepInput(BaseModel):
     )
     output_mode: str = Field(
         default="content",
-        description="输出模式: 'content' (显示匹配�?上下�?, "
-                    "'files_with_matches' (仅显示文件路�?, "
+        description="输出模式: 'content' (显示匹配?上下?, "
+                    "'files_with_matches' (仅显示文件路?, "
                     "'count' (显示每个文件的匹配数)"
     )
     context_lines: int = Field(
         default=2,
-        description="匹配行前后的上下文行数，�?content 模式有效"
+        description="匹配行前后的上下文行数，?content 模式有效"
     )
     max_results: int = Field(
         default=100,
@@ -670,7 +675,7 @@ class FileGrepInput(BaseModel):
     )
     case_sensitive: bool = Field(
         default=True,
-        description="是否区分大小�?"
+        description="是否区分大小?"
     )
     include_line_numbers: bool = Field(
         default=True,
@@ -678,20 +683,20 @@ class FileGrepInput(BaseModel):
     )
     multiline: bool = Field(
         default=False,
-        description="是否启用多行模式�? 匹配换行符）"
+        description="是否启用多行模式? 匹配换行符）"
     )
 
 
 class FileGrepTool(BaseTool):
-    """文件内容搜索工具�?
-    类似 Claude Code �?Grep、Codex CLI �?grep_files、DeepSeek TUI �?grep_search�?    优先使用 ripgrep（更快），回退�?Python re�?    支持多种输出模式、上下文行、glob 过滤�?    """
+    """文件内容搜索工具?
+    类似 Claude Code ?Grep、Codex CLI ?grep_files、DeepSeek TUI ?grep_search?    优先使用 ripgrep（更快），回退?Python re?    支持多种输出模式、上下文行、glob 过滤?    """
     name: str = "file_grep"
-    description: str = """在文件内容中搜索文本模式 - 类似 ripgrep/grep�?
-用于查找代码定义、引用、TODO、错误信息等文本�?支持正则表达式、glob 过滤、多种输出格式�?
+    description: str = """在文件内容中搜索文本模式 - 类似 ripgrep/grep?
+用于查找代码定义、引用、TODO、错误信息等文本?支持正则表达式、glob 过滤、多种输出格式?
 示例:
   - 查找函数定义: pattern="def \\w+\\("
   - 查找 TODO: pattern="TODO|FIXME"
-  - 统计匹配�? pattern="import" output_mode="count"
+  - 统计匹配? pattern="import" output_mode="count"
 """
     args_schema: Type[BaseModel] = FileGrepInput
     return_direct: bool = False
@@ -759,7 +764,7 @@ class FileGrepTool(BaseTool):
                 env={**os.environ, "PAGER": "cat"},
             )
         except subprocess.TimeoutExpired:
-            return f"搜索超时 (60�?: {pattern}"
+            return f"搜索超时 (60?: {pattern}"
         except Exception:
             return None
 
@@ -770,13 +775,13 @@ class FileGrepTool(BaseTool):
 
         output = result.stdout
         if not output.strip():
-            return f"未找到匹�? {pattern}"
+            return f"未找到匹? {pattern}"
 
         if output_mode == "content":
             lines = output.splitlines()
             if len(lines) > max_results:
                 output = "\n".join(lines[:max_results])
-                output += f"\n... (显示�?{max_results} 行，�?{len(lines)} �?"
+                output += f"\n... (显示?{max_results} 行，?{len(lines)} ?"
 
         return output
 
@@ -828,7 +833,7 @@ class FileGrepTool(BaseTool):
                     start = max(0, ln - 1 - context_lines)
                     end = min(len(lines), ln + context_lines)
                     for ctx_ln in range(start, end):
-                        prefix = f"{str(ctx_ln + 1).rjust(4)}�? if include_line_numbers else " ""
+                        prefix = f"{str(ctx_ln + 1).rjust(4)}? if include_line_numbers else " ""
                         marker = ">" if ctx_ln + 1 == ln else " "
                         matches.append(f"{file_path}:{prefix}{marker}{lines[ctx_ln].rstrip()}")
                     if ln != file_matches[-1]:
@@ -838,11 +843,11 @@ class FileGrepTool(BaseTool):
                 break
 
         if not matches:
-            return f"未找到匹�? {pattern}"
+            return f"未找到匹? {pattern}"
 
         result = "\n".join(matches[:max_results + context_lines * 2])
         if match_count > max_results:
-            result += f"\n... (显示�?{max_results} 个匹配，�?{match_count} �?"
+            result += f"\n... (显示?{max_results} 个匹配，?{match_count} ?"
 
         return result
 
@@ -851,23 +856,23 @@ class FileGrepTool(BaseTool):
 
 
 # ============================================================================
-# 4. 代码搜索 (增强�?
+# 4. 代码搜索 (增强?
 # ============================================================================
 
 @tool
 def search_code(directory: str, query: str, file_pattern: str = "*",
                 context_lines: int = 2, max_results: int = 50) -> str:
-    """在代码文件中搜索指定内容�?
-    增强�? 支持 ripgrep（自动检测），Python 原生回退，更多上下文控制�?
+    """在代码文件中搜索指定内容?
+    增强? 支持 ripgrep（自动检测），Python 原生回退，更多上下文控制?
     Args:
         directory: 搜索目录
-        query: 搜索关键词或正则表达�?        file_pattern: 文件名模式，默认�?*
+        query: 搜索关键词或正则表达?        file_pattern: 文件名模式，默认?*
         context_lines: 上下文行数，默认 2
-        max_results: 最大结果数，默�?50
+        max_results: 最大结果数，默?50
     """
     p = _safe_path(directory)
     if not p.exists():
-        return f"错误: 目录不存�? {directory}"
+        return f"错误: 目录不存? {directory}"
 
     try:
         rg_result = subprocess.run(
@@ -881,7 +886,7 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
             lines = output.splitlines()
             if len(lines) > max_results:
                 output = "\n".join(lines[:max_results])
-                output += f"\n... (显示�?{max_results} 行，�?{len(lines)} �?"
+                output += f"\n... (显示?{max_results} 行，?{len(lines)} ?"
             return output
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -893,11 +898,11 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
         )
         output = result.stdout.strip()
         if not output:
-            return f"未找到匹�? {query}"
+            return f"未找到匹? {query}"
         lines = output.split("\n")
         if len(lines) > max_results:
             output = "\n".join(lines[:max_results])
-            output += f"\n... (显示�?{max_results} 个匹配，�?{len(lines)} �?"
+            output += f"\n... (显示?{max_results} 个匹配，?{len(lines)} ?"
         return output
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -937,7 +942,7 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
             start = max(0, ln - 1 - context_lines)
             end = min(len(lines), ln + context_lines)
             for ctx_ln in range(start, end):
-                prefix = f"{str(ctx_ln + 1).rjust(4)}�?"
+                prefix = f"{str(ctx_ln + 1).rjust(4)}?"
                 marker = ">" if ctx_ln + 1 == ln else " "
                 matches.append(f"{file_path}:{prefix}{marker}{lines[ctx_ln].rstrip()}")
             if ln != file_matches[-1]:
@@ -947,11 +952,11 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
             break
 
     if not matches:
-        return f"未找到匹�? {query}"
+        return f"未找到匹? {query}"
 
     result = "\n".join(matches[:max_results + context_lines * 2])
     if match_count > max_results:
-        result += f"\n... (显示�?{max_results} 个匹配，�?{match_count} �?"
+        result += f"\n... (显示?{max_results} 个匹配，?{match_count} ?"
 
     return result
 
@@ -962,10 +967,10 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
 
 @tool
 def execute_command(command: str, working_dir: str = ".", timeout: int = 60) -> str:
-    """执行 shell 命令并返回输出�?
+    """执行 shell 命令并返回输出?
     安全特性：
-    - 严格模式命令黑名单（YOLO 模式下也不可绕过�?    - 工作目录逃逸检�?    - 敏感环境变量自动过滤
-    - shell 注入防护（优�?shell=False 无元字符执行�?
+    - 严格模式命令黑名单（YOLO 模式下也不可绕过?    - 工作目录逃逸检?    - 敏感环境变量自动过滤
+    - shell 注入防护（优?shell=False 无元字符执行?
     Args:
         command: 要执行的命令
         working_dir: 工作目录
@@ -982,14 +987,14 @@ def execute_command(command: str, working_dir: str = ".", timeout: int = 60) -> 
     if blacklist_error:
         return blacklist_error
 
-    # 2. 工作目录逃逸检�?    escape_error = _detect_escape_attempt(cmd_stripped)
+    # 2. 工作目录逃逸检?    escape_error = _detect_escape_attempt(cmd_stripped)
     if escape_error:
         return escape_error
 
     # 3. 环境变量过滤（移除敏感键值）
     safe_env = _sanitize_environment()
 
-    # 4. 尝试 shell=False 执行（优先防注入�?    args = _try_split_command(cmd_stripped)
+    # 4. 尝试 shell=False 执行（优先防注入?    args = _try_split_command(cmd_stripped)
     if args is not None:
         use_shell = False
     else:
@@ -1014,15 +1019,15 @@ def execute_command(command: str, working_dir: str = ".", timeout: int = 60) -> 
             output = output[:50000] + f"\n\n[输出截断，共 {len(output)} 字符]"
         return output
     except subprocess.TimeoutExpired:
-        return f"错误: 命令执行超时 ({timeout}�?"
+        return f"错误: 命令执行超时 ({timeout}?"
     except Exception as e:
         return _format_command_error(cmd_stripped, str(e))
 
 
 @tool
 async def async_execute_command(command: str, working_dir: str = ".", timeout: int = 60) -> str:
-    """执行 shell 命令并实时流式返回输出（异步版本）�?
-    �?execute_command 同等的安全检查，但使�?asyncio 异步执行�?    命令输出会通过 EventBus 流式推送，不会阻塞事件循环�?
+    """执行 shell 命令并实时流式返回输出（异步版本）?
+    ?execute_command 同等的安全检查，但使?asyncio 异步执行?    命令输出会通过 EventBus 流式推送，不会阻塞事件循环?
     Args:
         command: 要执行的命令
         working_dir: 工作目录
@@ -1102,10 +1107,10 @@ async def async_execute_command(command: str, working_dir: str = ".", timeout: i
             await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, proc.wait()), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            return f"错误: 命令执行超时 ({timeout}�?"
+            return f"错误: 命令执行超时 ({timeout}?"
         except asyncio.CancelledError:
             proc.terminate()
-            return "执行被取�?"
+            return "执行被取?"
 
         output = "\n".join(stdout_lines)
         if stderr_lines:
@@ -1124,10 +1129,10 @@ async def async_execute_command(command: str, working_dir: str = ".", timeout: i
 @tool
 @retry_sync(_RETRYABLE_NET)
 def web_search(query: str, max_results: int = 5) -> str:
-    """搜索互联网获取最新信息�?
-    类似 Claude Code �?WebSearch、Codex CLI �?web_search�?    使用 DuckDuckGo 的免费搜�?API�?
+    """搜索互联网获取最新信息?
+    类似 Claude Code ?WebSearch、Codex CLI ?web_search?    使用 DuckDuckGo 的免费搜?API?
     Args:
-        query: 搜索关键�?        max_results: 返回结果数，默认 5，最�?10
+        query: 搜索关键?        max_results: 返回结果数，默认 5，最?10
     """
     max_results = min(max_results, 10)
     try:
@@ -1156,13 +1161,13 @@ def web_search(query: str, max_results: int = 5) -> str:
             if "Text" in topic:
                 text = topic["Text"]
                 first_url = topic.get("FirstURL", "")
-                results.append(f"�?{text}")
+                results.append(f"?{text}")
                 if first_url:
                     results.append(f"  {first_url}")
             elif "Topics" in topic:
                 for sub in topic["Topics"][:3]:
                     if "Text" in sub:
-                        results.append(f"�?{sub['Text']}")
+                        results.append(f"?{sub['Text']}")
                         if "FirstURL" in sub:
                             results.append(f"  {sub['FirstURL']}")
 
@@ -1177,10 +1182,10 @@ def web_search(query: str, max_results: int = 5) -> str:
                 resp.text, re.DOTALL
             )
             for s in snippets[:max_results]:
-                results.append(f"�?{html.unescape(re.sub(r'<[^>]+>', '', s)).strip()}")
+                results.append(f"?{html.unescape(re.sub(r'<[^>]+>', '', s)).strip()}")
 
         if not results:
-            return f"未找�?'{query}' 的相关结�?"
+            return f"未找?'{query}' 的相关结?"
 
         return f"--- 搜索结果: {query} ---\n" + "\n".join(results)
 
@@ -1189,7 +1194,7 @@ def web_search(query: str, max_results: int = 5) -> str:
             OSError):
         raise
     except ImportError:
-        return "错误: 需要安�?requests �?(pip install requests)"
+        return "错误: 需要安?requests ?(pip install requests)"
     except Exception as e:
         return f"错误: 搜索失败: {e}"
 
@@ -1197,11 +1202,11 @@ def web_search(query: str, max_results: int = 5) -> str:
 @tool
 @retry_sync(_RETRYABLE_NET)
 def web_fetch(url: str, max_length: int = 10000) -> str:
-    """获取网页内容并转换为 Markdown 格式�?
-    类似 Claude Code �?WebFetch、Codex CLI �?web_fetch�?    用于读取在线文档、API 响应等�?
+    """获取网页内容并转换为 Markdown 格式?
+    类似 Claude Code ?WebFetch、Codex CLI ?web_fetch?    用于读取在线文档、API 响应等?
     Args:
         url: 网页 URL
-        max_length: 最大返回字符数，默�?10000
+        max_length: 最大返回字符数，默?10000
     """
     try:
         headers = {
@@ -1242,7 +1247,7 @@ def web_fetch(url: str, max_length: int = 10000) -> str:
         if len(text) > max_length:
             text = text[:max_length] + f"\n\n[内容截断，原文共 {len(text)} 字符]"
 
-        return text if text else f"错误: 无法提取 '{url}' 的内�?"
+        return text if text else f"错误: 无法提取 '{url}' 的内?"
 
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout,
@@ -1251,7 +1256,7 @@ def web_fetch(url: str, max_length: int = 10000) -> str:
     except requests.exceptions.HTTPError as e:
         return f"错误: HTTP {e.response.status_code}: {url}"
     except ImportError:
-        return "错误: 需要安�?requests �?(pip install requests)"
+        return "错误: 需要安?requests ?(pip install requests)"
     except Exception as e:
         return f"错误: 获取失败: {e}"
 
@@ -1262,9 +1267,9 @@ def web_fetch(url: str, max_length: int = 10000) -> str:
 
 @tool
 def git_status(path: str = "") -> str:
-    """查看 Git 工作区状态（相当�?git status）�?
+    """查看 Git 工作区状态（相当?git status）?
     Args:
-        path: 可选的子目录或文件路径，只查看指定范围的状�?    """
+        path: 可选的子目录或文件路径，只查看指定范围的状?    """
     try:
         cmd = ["git", "status", "--porcelain=v1", "-b"]
         if path:
@@ -1276,7 +1281,7 @@ def git_status(path: str = "") -> str:
             return f"git status 失败:\n{result.stderr.strip()}"
         return result.stdout.strip() or "工作区干净，无变动"
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1285,11 +1290,11 @@ def git_status(path: str = "") -> str:
 
 @tool
 def git_diff(path: str = "", cached: bool = False, unified: int = 3) -> str:
-    """查看 Git 工作区差异（相当�?git diff）�?
+    """查看 Git 工作区差异（相当?git diff）?
     Args:
         path: 可选的子目录或文件路径
         cached: 是否查看已暂存的变更 (--cached)
-        unified: 上下文行数，默认 3，范�?0-50
+        unified: 上下文行数，默认 3，范?0-50
     """
     try:
         unified = max(0, min(unified, 50))
@@ -1308,7 +1313,7 @@ def git_diff(path: str = "", cached: bool = False, unified: int = 3) -> str:
             output = output[:20000] + f"\n\n[输出截断，共 {len(output)} 字符]"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1318,10 +1323,10 @@ def git_diff(path: str = "", cached: bool = False, unified: int = 3) -> str:
 @tool
 def git_log(max_count: int = 20, path: str = "", author: str = "",
             since: str = "") -> str:
-    """查看 Git 提交历史（相当于 git log）�?
+    """查看 Git 提交历史（相当于 git log）?
     Args:
-        max_count: 最大返回提交数，默�?20，最�?200
-        path: 可选的子目录或文件路径，只查看指定文件的变更历�?        author: 按作者筛选（�?"author:张三"�?        since: 起始时间（如 "2 weeks ago" �?"2025-01-01"�?    """
+        max_count: 最大返回提交数，默?20，最?200
+        path: 可选的子目录或文件路径，只查看指定文件的变更历?        author: 按作者筛选（?"author:张三"?        since: 起始时间（如 "2 weeks ago" ?"2025-01-01"?    """
     try:
         max_count = max(1, min(max_count, 200))
         cmd = [
@@ -1346,7 +1351,7 @@ def git_log(max_count: int = 20, path: str = "", author: str = "",
             return "没有提交记录"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1355,7 +1360,7 @@ def git_log(max_count: int = 20, path: str = "", author: str = "",
 
 @tool
 def git_commit(message: str, add_all: bool = True) -> str:
-    """创建 Git 提交（先自动暂存变动，再提交）�?
+    """创建 Git 提交（先自动暂存变动，再提交）?
     Args:
         message: 提交信息
         add_all: 是否自动暂存所有变动（git add --all），默认 True
@@ -1381,7 +1386,7 @@ def git_commit(message: str, add_all: bool = True) -> str:
             return f"git commit 失败:\n{error}"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1390,21 +1395,21 @@ def git_commit(message: str, add_all: bool = True) -> str:
 
 @tool
 def git_branch(name: str = "", action: str = "list", list_all: bool = False, force: bool = False) -> str:
-    """列出、创建或删除 Git 分支（相当于 git branch）�?
+    """列出、创建或删除 Git 分支（相当于 git branch）?
     Args:
-        name: 分支名称。action �?"create" 时创建该分支；为 "delete" 时删除该分支
-        action: 操作类型，可�?"list"（列出）�?create"（创建）�?delete"（删除），默�?"list"
+        name: 分支名称。action ?"create" 时创建该分支；为 "delete" 时删除该分支
+        action: 操作类型，可?"list"（列出）?create"（创建）?delete"（删除），默?"list"
         list_all: 是否列出所有分支（含远程分支），仅 action="list" 时有效，默认 False
-        force: 是否强制删除未合并的分支（使�?-D），�?action="delete" 时有效，默认 False
+        force: 是否强制删除未合并的分支（使?-D），?action="delete" 时有效，默认 False
     """
     try:
         if action == "create":
             if not name:
-                return "错误: 创建分支时必须提�?name"
+                return "错误: 创建分支时必须提?name"
             cmd = ["git", "branch", name]
         elif action == "delete":
             if not name:
-                return "错误: 删除分支时必须提�?name"
+                return "错误: 删除分支时必须提?name"
             flag = "-D" if force else "-d"
             cmd = ["git", "branch", flag, name]
         else:
@@ -1422,7 +1427,7 @@ def git_branch(name: str = "", action: str = "list", list_all: bool = False, for
             return "没有分支信息"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1431,10 +1436,10 @@ def git_branch(name: str = "", action: str = "list", list_all: bool = False, for
 
 @tool
 def git_stash(action: str = "list", message: str = "", index: int = 0) -> str:
-    """管理 Git 暂存区（相当�?git stash）�?
+    """管理 Git 暂存区（相当?git stash）?
     Args:
-        action: 操作类型，可�?"list"（列出）�?push"（暂存）�?pop"（恢复并删除）�?                "apply"（恢复但不删除）�?drop"（删除指定暂存）�?show"（查看暂存内容），默�?"list"
-        message: 暂存时的描述信息，仅 action="push" 时有�?        index: 暂存编号（从 0 开始），用�?pop/apply/drop/show，默�?0
+        action: 操作类型，可?"list"（列出）?push"（暂存）?pop"（恢复并删除）?                "apply"（恢复但不删除）?drop"（删除指定暂存）?show"（查看暂存内容），默?"list"
+        message: 暂存时的描述信息，仅 action="push" 时有?        index: 暂存编号（从 0 开始），用?pop/apply/drop/show，默?0
     """
     try:
         if action == "push":
@@ -1465,13 +1470,13 @@ def git_stash(action: str = "list", message: str = "", index: int = 0) -> str:
             if action == "push":
                 return "工作区已干净，无需暂存"
             if action == "drop":
-                return f"已删除暂�?stash@{{{index}}}"
+                return f"已删除暂?stash@{{{index}}}"
             return "操作成功完成"
         if len(output) > 20000:
             output = output[:20000] + f"\n\n[输出截断，共 {len(output)} 字符]"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1480,11 +1485,11 @@ def git_stash(action: str = "list", message: str = "", index: int = 0) -> str:
 
 @tool
 def git_restore(path: str, staged: bool = False, source: str = "") -> str:
-    """恢复 Git 工作区文件（相当�?git restore）�?
+    """恢复 Git 工作区文件（相当?git restore）?
     Args:
         path: 要恢复的文件路径（必须）
-        staged: 是否从暂存区恢复到工作区�?-staged），默认 False
-        source: 从指定提交或分支恢复�?-source），�?"HEAD~1" �?"main"
+        staged: 是否从暂存区恢复到工作区?-staged），默认 False
+        source: 从指定提交或分支恢复?-source），?"HEAD~1" ?"main"
     """
     try:
         cmd = ["git", "restore"]
@@ -1502,13 +1507,13 @@ def git_restore(path: str, staged: bool = False, source: str = "") -> str:
             return f"git restore 失败:\n{result.stderr.strip()}"
         parts = []
         if source:
-            parts.append(f"�?{source}")
+            parts.append(f"?{source}")
         if staged:
             parts.append("从暂存区")
         parts.append(path)
-        return f"已恢�? {' '.join(parts)}"
+        return f"已恢? {' '.join(parts)}"
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1517,11 +1522,11 @@ def git_restore(path: str, staged: bool = False, source: str = "") -> str:
 
 @tool
 def git_blame(file_path: str, start_line: int = 1, end_line: int = 0, email: bool = False) -> str:
-    """查看文件每行归属信息（相当于 git blame）�?
+    """查看文件每行归属信息（相当于 git blame）?
     Args:
         file_path: 文件路径（必须）
-        start_line: 起始行号 (1-based)，默�?1
-        end_line: 结束行号 (1-based)�? 表示到文件末�?        email: 是否显示邮箱代替用户名，默认 False
+        start_line: 起始行号 (1-based)，默?1
+        end_line: 结束行号 (1-based)? 表示到文件末?        email: 是否显示邮箱代替用户名，默认 False
     """
     try:
         cmd = ["git", "blame"]
@@ -1539,12 +1544,12 @@ def git_blame(file_path: str, start_line: int = 1, end_line: int = 0, email: boo
             return f"git blame 失败:\n{result.stderr.strip()}"
         output = result.stdout.strip()
         if not output:
-            return f"文件 '{file_path}' 为空或没�?blame 信息"
+            return f"文件 '{file_path}' 为空或没?blame 信息"
         if len(output) > 20000:
             output = output[:20000] + f"\n\n[输出截断，共 {len(output)} 字符]"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1553,7 +1558,7 @@ def git_blame(file_path: str, start_line: int = 1, end_line: int = 0, email: boo
 
 @tool
 def git_cherry_pick(commits: str, no_commit: bool = False) -> str:
-    """将指定提交应用到当前分支（相当于 git cherry-pick）�?
+    """将指定提交应用到当前分支（相当于 git cherry-pick）?
     Args:
         commits: 要应用的提交哈希，多个提交用空格分隔，如 "abc123 def456"
         no_commit: 仅应用变更但不自动创建提交（--no-commit），默认 False
@@ -1579,7 +1584,7 @@ def git_cherry_pick(commits: str, no_commit: bool = False) -> str:
             output = output[:20000] + f"\n\n[输出截断，共 {len(output)} 字符]"
         return output
     except FileNotFoundError:
-        return "错误: git 未安装或不在 PATH �?"
+        return "错误: git 未安装或不在 PATH ?"
     except subprocess.TimeoutExpired:
         return "错误: git 命令超时"
     except Exception as e:
@@ -1587,7 +1592,7 @@ def git_cherry_pick(commits: str, no_commit: bool = False) -> str:
 
 
 # ============================================================================
-# 工具注册�?# ============================================================================
+# 工具注册?# ============================================================================
 
 FILE_EDIT_TOOL = FileEditTool()
 FILE_GREP_TOOL = FileGrepTool()
