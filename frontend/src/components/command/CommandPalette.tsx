@@ -79,14 +79,14 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
     { id: 'file.open', label: '打开文件', category: '文件操作', action: () => {
       onOpenFile?.()
     }},
-    { id: 'file.tree', label: '刷新文件树 /tree', category: '文件操作', action: () => {
+    { id: 'file.tree', label: '刷新文件树', category: '文件操作', action: () => {
       addSysMsg('请在左侧侧边栏点击「文件树」展开查看')
     }},
     { id: 'mcp.configure', label: '配置 MCP 服务器', category: 'MCP 管理', action: () => {
       const ws = getWs()
       ws?.send('mcp.configure', {})
     }},
-    { id: 'mcp.connect', label: '接入 MCP 服务器 /mcp', category: 'MCP 管理', action: () => {
+    { id: 'mcp.connect', label: '接入 MCP 服务器', category: 'MCP 管理', action: () => {
       addSysMsg('请在左侧面板底部点击「MCP Servers」进行配置，或在终端使用 goat mcp add 命令')
     }},
     { id: 'session.delete', label: '删除当前会话', category: '会话管理', action: () => {
@@ -120,7 +120,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
         useSessionStore.getState().setActiveSession(sessions[0].id)
       }
     }},
-    { id: 'file.read', label: '读取文件 /read <path>', category: '文件操作', action: async () => {
+    { id: 'file.read', label: '读取文件 <path>', category: '文件操作', action: async () => {
       const path = extractArg('/read')
       if (!path) { addSysMsg('用法: /read <文件路径>'); return }
       try {
@@ -132,7 +132,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
         addSysMsg(preview)
       } catch { addSysMsg(`读取文件失败`) }
     }},
-    { id: 'file.edit', label: '编辑文件 /edit <path>', category: '文件操作', action: async () => {
+    { id: 'file.edit', label: '编辑文件 <path>', category: '文件操作', action: async () => {
       const path = extractArg('/edit')
       if (!path) { addSysMsg('用法: /edit <文件路径>'); return }
       try {
@@ -142,19 +142,19 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
         onEditFile?.(data.path, data.content)
       } catch { addSysMsg(`读取文件失败`) }
     }},
-    { id: 'subagent.spawn', label: '创建子 Agent /spawn <角色> <任务>', category: '子 Agent', action: () => {
+    { id: 'subagent.spawn', label: '创建子 Agent <角色> <任务>', category: '子 Agent', action: () => {
       addSysMsg('子 Agent 功能需要在 CLI 终端中使用，Web 模式暂不支持\n可用角色: general, explore, plan, implementer, review, verifier\n用法: /spawn <角色> <任务描述>')
     }},
-    { id: 'subagent.list', label: '列出子 Agent /list', category: '子 Agent', action: () => {
+    { id: 'subagent.list', label: '列出子 Agent', category: '子 Agent', action: () => {
       addSysMsg('子 Agent 状态请在 CLI 终端中使用 /list 查看')
     }},
-    { id: 'subagent.collect', label: '收集子 Agent /collect [ids]', category: '子 Agent', action: () => {
+    { id: 'subagent.collect', label: '收集子 Agent [ids]', category: '子 Agent', action: () => {
       addSysMsg('请在 CLI 终端中使用 /collect [ids] 收集子 Agent 结果')
     }},
-    { id: 'subagent.cancel', label: '取消子 Agent /cancel <id>', category: '子 Agent', action: () => {
+    { id: 'subagent.cancel', label: '取消子 Agent <id>', category: '子 Agent', action: () => {
       addSysMsg('请在 CLI 终端中使用 /cancel <id> 取消子 Agent')
     }},
-    { id: 'subagent.eval', label: '向子 Agent 发消息 /eval <id> <msg>', category: '子 Agent', action: () => {
+    { id: 'subagent.eval', label: '向子 Agent 发消息 <id> <msg>', category: '子 Agent', action: () => {
       addSysMsg('请在 CLI 终端中使用 /eval <id> <消息> 与子 Agent 通信')
     }},
     { id: 'chat.clear', label: '清空对话', category: '聊天操作', action: () => {
@@ -187,10 +187,10 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
       const s = useConnectionStore.getState()
       addSysMsg(`Token 使用: ${s.tokenCount} | Provider: ${s.providerName || '未设置'} | 模型: ${s.modelName || '未设置'}`)
     }},
-    { id: 'info.roles', label: '列出可用角色 /roles', category: '信息查询', action: () => {
+    { id: 'info.roles', label: '列出可用角色', category: '信息查询', action: () => {
       addSysMsg('可用角色类型:\n  general — 通用助手\n  explore — 代码探索专家 (只读工具)\n  plan — 任务规划专家 (只读 + write)\n  implementer — 代码实现专家 (读写 + 命令)\n  review — 代码审查专家 (只读工具)\n  verifier — 测试验证专家 (只读 + 命令)')
     }},
-    { id: 'info.skills', label: '技能管理 /skills', category: '信息查询', action: async () => {
+    { id: 'info.skills', label: '技能管理', category: '信息查询', action: async () => {
       try {
         const res = await fetch('/api/skills')
         const data = await res.json()
@@ -213,22 +213,22 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
       const s = useConnectionStore.getState()
       addSysMsg(`当前模型: ${s.modelName || '未设置'} | 请在设置面板中切换 (点击状态栏齿轮图标)`)
     }},
-    { id: 'task.submit', label: '提交后台任务 /task <名称> [描述]', category: '后台任务', action: () => {
+    { id: 'task.submit', label: '提交后台任务 <名称> [描述]', category: '后台任务', action: () => {
       addSysMsg('后台任务管理请在 CLI 终端中使用:\n  /task <名称> [描述] — 提交任务\n  /task_list [status] — 列出任务\n  /task_cancel <id> — 取消任务\n  /task_pause <id> — 暂停任务\n  /task_resume <id> — 恢复任务\n  /task_recover — 恢复中断任务')
     }},
-    { id: 'task.list', label: '列出后台任务 /task_list', category: '后台任务', action: () => {
+    { id: 'task.list', label: '列出后台任务', category: '后台任务', action: () => {
       addSysMsg('请在 CLI 终端中使用 /task_list [status] 查看后台任务')
     }},
-    { id: 'task.cancel', label: '取消任务 /task_cancel <id>', category: '后台任务', action: () => {
+    { id: 'task.cancel', label: '取消任务 <id>', category: '后台任务', action: () => {
       addSysMsg('请在 CLI 终端中使用 /task_cancel <id> 取消任务')
     }},
-    { id: 'task.pause', label: '暂停任务 /task_pause <id>', category: '后台任务', action: () => {
+    { id: 'task.pause', label: '暂停任务 <id>', category: '后台任务', action: () => {
       addSysMsg('请在 CLI 终端中使用 /task_pause <id> 暂停任务')
     }},
-    { id: 'task.resume', label: '恢复任务 /task_resume <id>', category: '后台任务', action: () => {
+    { id: 'task.resume', label: '恢复任务 <id>', category: '后台任务', action: () => {
       addSysMsg('请在 CLI 终端中使用 /task_resume <id> 恢复任务')
     }},
-    { id: 'task.recover', label: '恢复中断任务 /task_recover', category: '后台任务', action: () => {
+    { id: 'task.recover', label: '恢复中断任务', category: '后台任务', action: () => {
       addSysMsg('请在 CLI 终端中使用 /task_recover 恢复中断的任务')
     }},
   ], [setMode, onOpenFile, onNewFile, onEditFile])
@@ -237,7 +237,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
     const win = window as any
     win.__commandPaletteOpen = (q: string) => {
       setIsOpen(true)
-      setQuery(q)
+      setQuery(q.startsWith('/') ? q.slice(1) : q)
     }
     return () => {
       delete win.__commandPaletteOpen

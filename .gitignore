@@ -63,6 +63,12 @@ openspec/
 tips/
 .plans/
 
+# Tests (not shipped to users)
+tests/
+
+# Local goat config (rules & mcp_config are dev-time only)
+.goat/
+
 # Development process docs (not part of the project artifact)
 docs/
 GOAT.md
