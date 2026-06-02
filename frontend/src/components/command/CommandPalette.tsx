@@ -23,6 +23,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const queryRef = useRef('')
+  const listRef = useRef<HTMLDivElement>(null)
   const setMode = useConnectionStore((s) => s.setMode)
 
   function getWs() {
@@ -275,6 +276,14 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
       : commands
   }, [query, commands])
 
+  useEffect(() => {
+    if (!listRef.current || filtered.length === 0) return
+    const el = listRef.current.querySelector(`[data-index="${selectedIndex}"]`)
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ block: 'nearest' })
+    }
+  }, [selectedIndex, filtered.length])
+
   const execute = (cmd: Command) => {
     cmd.action()
     setIsOpen(false)
@@ -324,7 +333,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
             className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-darker"
           />
         </div>
-        <div className="max-h-64 overflow-y-auto">
+        <div ref={listRef} className="max-h-64 overflow-y-auto">
           {filtered.length === 0 && (
             <div className="px-4 py-6 text-center text-text-darker text-sm">
               无匹配结果
@@ -338,6 +347,7 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
                 return (
                   <div
                     key={cmd.id}
+                    data-index={actualIndex}
                     onClick={() => execute(cmd)}
                     className={`px-4 py-2 text-sm cursor-pointer transition-colors ${
                       actualIndex === selectedIndex
