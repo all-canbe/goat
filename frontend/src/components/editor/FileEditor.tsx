@@ -22,7 +22,21 @@ export default function FileEditor({ isOpen, onClose, filePath, initialContent }
   const [prevSize, setPrevSize] = useState<{ width: number; height: number; left: number; top: number } | null>(null)
   const [position, setPosition] = useState({ left: 0, top: 0 })
   const draggingRef = useRef<{ startX: number; startY: number; startW: number; startH: number; startL: number; startT: number } | null>(null)
+  const moveHandlerRef = useRef<((ev: PointerEvent) => void) | null>(null)
+  const upHandlerRef = useRef<((ev: PointerEvent) => void) | null>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    return () => {
+      if (moveHandlerRef.current) {
+        document.removeEventListener('pointermove', moveHandlerRef.current)
+      }
+      if (upHandlerRef.current) {
+        document.removeEventListener('pointerup', upHandlerRef.current)
+      }
+      document.body.style.cursor = ''
+    }
+  }, [])
 
   useEffect(() => {
     if (isOpen) {
@@ -81,10 +95,14 @@ export default function FileEditor({ isOpen, onClose, filePath, initialContent }
     }
     const onUp = () => {
       draggingRef.current = null
+      moveHandlerRef.current = null
+      upHandlerRef.current = null
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)
       document.body.style.cursor = ''
     }
+    moveHandlerRef.current = onMove
+    upHandlerRef.current = onUp
     document.addEventListener('pointermove', onMove)
     document.addEventListener('pointerup', onUp)
     document.body.style.cursor = 'nwse-resize'
@@ -115,9 +133,13 @@ export default function FileEditor({ isOpen, onClose, filePath, initialContent }
     }
     const onUp = () => {
       draggingRef.current = null
+      moveHandlerRef.current = null
+      upHandlerRef.current = null
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)
     }
+    moveHandlerRef.current = onMove
+    upHandlerRef.current = onUp
     document.addEventListener('pointermove', onMove)
     document.addEventListener('pointerup', onUp)
   }, [isMaximized, size.width, size.height, position.left, position.top])

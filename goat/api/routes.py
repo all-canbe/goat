@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -325,6 +327,72 @@ async def delete_mcp_server(name: str):
     cfg.connections = [c for c in cfg.connections if c.name != name]
     save_mcp_config(cfg.connections)
     return {"deleted": name}
+
+
+@router.post("/mcp/servers/{name}/test")
+async def test_mcp_server(name: str):
+    cfg = load_mcp_config()
+    conn = next((c for c in cfg.connections if c.name == name), None)
+    if not conn:
+        return {"ok": False, "message": f"server '{name}' not found"}
+
+    try:
+        from mcp import ClientSession
+
+        stack = AsyncExitStack()
+        await stack.__aenter__()
+
+        try:
+            if conn.command:
+                from mcp.client.stdio import stdio_client, StdioServerParameters
+                params = StdioServerParameters(
+                    command=conn.command,
+                    args=conn.args,
+                    env=conn.env or None,
+                )
+                read, write = await asyncio.wait_for(
+                    stack.enter_async_context(stdio_client(params)),
+                    timeout=10,
+                )
+            elif conn.url:
+                transport = (conn.transport or "").lower()
+                if transport == "sse":
+                    from mcp.client.sse import sse_client
+                    read, write = await asyncio.wait_for(
+                        stack.enter_async_context(sse_client(conn.url)),
+                        timeout=10,
+                    )
+                else:
+                    try:
+                        from mcp.client.streamable_http import streamablehttp_client
+                        read, write = await asyncio.wait_for(
+                            stack.enter_async_context(
+                                streamablehttp_client(conn.url, headers=conn.headers or None)
+                            ),
+                            timeout=10,
+                        )
+                    except Exception:
+                        from mcp.client.sse import sse_client
+                        read, write = await asyncio.wait_for(
+                            stack.enter_async_context(sse_client(conn.url)),
+                            timeout=10,
+                        )
+            else:
+                return {"ok": False, "message": "no command or url configured"}
+
+            session = await asyncio.wait_for(
+                stack.enter_async_context(ClientSession(read, write)),
+                timeout=10,
+            )
+            await asyncio.wait_for(session.initialize(), timeout=10)
+
+            return {"ok": True, "message": "Connected"}
+        finally:
+            await stack.aclose()
+    except asyncio.TimeoutError:
+        return {"ok": False, "message": "Connection timed out after 10s"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
 
 
 @router.get("/files/read")

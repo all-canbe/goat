@@ -3,6 +3,7 @@ import { Search } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useSkillStore } from '@/stores/skillStore'
 
 interface CommandPaletteProps {
   onOpenFile?: () => void
@@ -191,20 +192,25 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
     { id: 'info.roles', label: '列出可用角色', category: '信息查询', action: () => {
       addSysMsg('可用角色类型:\n  general — 通用助手\n  explore — 代码探索专家 (只读工具)\n  plan — 任务规划专家 (只读 + write)\n  implementer — 代码实现专家 (读写 + 命令)\n  review — 代码审查专家 (只读工具)\n  verifier — 测试验证专家 (只读 + 命令)')
     }},
-    { id: 'info.skills', label: '技能管理', category: '信息查询', action: async () => {
-      try {
-        const res = await fetch('/api/skills')
-        const data = await res.json()
-        const skills = data.skills || []
-        if (skills.length === 0) {
-          addSysMsg('当前没有已安装的技能。\n可通过 /skills install <url> 在 CLI 终端中安装。')
-        } else {
-          const lines = skills.map((s: any) => `  - ${s.name}: ${s.description || '无描述'}`)
-          addSysMsg(`已安装技能 (${skills.length} 个):\n${lines.join('\n')}\n\nAgent 会自动使用已安装的技能。`)
-        }
-      } catch {
-        addSysMsg('技能服务不可用，请检查后端连接。')
+    { id: 'info.skills', label: '列出已安装技能', category: '技能管理', action: async () => {
+      const store = useSkillStore.getState()
+      await store.loadSkills()
+      const skills = store.skills
+      if (skills.length === 0) {
+        addSysMsg('当前没有已安装的技能。\n可尝试「重新加载技能」命令，或在 CLI 终端中使用 /skills install <url> 安装。')
+      } else {
+        const lines = skills.map((s: any) => `  - ${s.name}: ${s.description || '无描述'}`)
+        addSysMsg(`已安装技能 (${skills.length} 个):\n${lines.join('\n')}\n\nAgent 会自动使用已安装的技能。`)
       }
+    }},
+    { id: 'skills.reload', label: '重新加载技能', category: '技能管理', action: async () => {
+      const store = useSkillStore.getState()
+      await store.reloadSkills()
+      const count = store.skills.length
+      addSysMsg(`技能已重新加载，当前共 ${count} 个技能。`)
+    }},
+    { id: 'skills.find', label: '搜索并安装技能 (findskill)', category: '技能管理', action: () => {
+      useSkillStore.getState().startSearch()
     }},
     { id: 'config.provider', label: '查看/切换 Provider', category: '网络配置', action: () => {
       const s = useConnectionStore.getState()

@@ -72,6 +72,8 @@ class WSManager:
             await self._handle_config_update(payload)
         elif msg_type == "ask_user.answer":
             await self._handle_ask_user_answer(payload)
+        elif msg_type == "skills.install":
+            await self._handle_skills_install(payload)
         else:
             logger.warning("Unknown message type: %s", msg_type)
 
@@ -131,6 +133,44 @@ class WSManager:
         logger.info("Ask user answer: %s -> %s", question_id, answer[:100])
         from goat.tools.ask_user_tool import submit_user_answer
         submit_user_answer(answer)
+
+    async def _handle_skills_install(self, payload: dict) -> None:
+        selections = payload.get("selections", [])
+        session_id = payload.get("sessionId", "default")
+        results: list[dict] = []
+
+        for sel in selections:
+            url = sel.get("url", "")
+            scope = sel.get("scope", "project")
+            if not url:
+                continue
+            try:
+                cmd = f"npx skills add {url}"
+                if scope == "global":
+                    cmd += " --global"
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    results.append({"url": url, "success": True, "output": stdout.decode(errors="replace")})
+                else:
+                    results.append({"url": url, "success": False, "error": stderr.decode(errors="replace")})
+            except Exception as e:
+                results.append({"url": url, "success": False, "error": str(e)})
+
+        if self._session_manager and hasattr(self._session_manager, 'skill_registry'):
+            from goat.core.workspace import get_skills_dir
+            skills_dir = get_skills_dir()
+            if skills_dir.exists():
+                self._session_manager.skill_registry.load_skills_from_directory(skills_dir)
+
+        await self.broadcast_to_session(session_id, {
+            "type": "skills.install.result",
+            "payload": {"results": results}
+        })
 
 
 ws_manager = WSManager()

@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { WSClient } from '@/lib/ws-client'
 import { useChatStore } from '@/stores/chatStore'
 import { useConnectionStore } from '@/stores/connectionStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { PendingApproval, PermissionMode, ToolCall } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
@@ -89,7 +90,8 @@ export function useWebSocket() {
     })
 
     const unsubAskUser = client.on('ask_user', (msg) => {
-      const sid = getSessionId(msg)
+      const activeSid = useSessionStore.getState().activeSessionId
+      const sid = activeSid || getSessionId(msg)
       useChatStore.getState().setPendingQuestion(sid, {
         questionId: (msg.payload.questionId as string) || '',
         question: (msg.payload.question as string) || '',

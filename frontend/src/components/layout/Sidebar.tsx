@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Plus, Server, FolderTree, ListTodo, Pencil } from 'lucide-react'
+import { Plus, Server, FolderTree, ListTodo, Pencil, RefreshCw } from 'lucide-react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useConfigStore } from '@/stores/configStore'
 import SessionList from '@/components/session/SessionList'
@@ -75,6 +75,13 @@ export default function Sidebar() {
                 <span className="text-xs text-text-darker truncate flex-1" title={workspace}>
                   {workspace ? truncatePath(workspace) : ''}
                 </span>
+                <button
+                  onClick={() => fetchTree()}
+                  className="p-0.5 rounded hover:bg-surface-light text-text-darker hover:text-text transition-colors flex-shrink-0"
+                  title="刷新文件树"
+                >
+                  <RefreshCw size={11} />
+                </button>
                 <button
                   onClick={() => setWorkspacePickerOpen(true)}
                   className="p-0.5 rounded hover:bg-surface-light text-text-darker hover:text-text transition-colors flex-shrink-0"
