@@ -63,6 +63,13 @@ openspec/
 tips/
 .plans/
 
+# Development process docs (not part of the project artifact)
+docs/
+GOAT.md
+
+# Local agents skills (development-time, not shipped to users)
+.agents/
+
 # Virtual env
 venv/
 .venv/
