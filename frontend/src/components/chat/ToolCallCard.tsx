@@ -28,7 +28,7 @@ export default function ToolCallCard({ toolCall }: ToolCallCardProps) {
   }
 
   return (
-    <div className="mx-4 my-1 border border-border rounded bg-surface-light overflow-hidden">
+    <div className="my-1 border border-border rounded bg-surface-light overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 text-sm">
         {statusIcons[toolCall.status]}
         <Wrench size={14} className="text-text-dim" />

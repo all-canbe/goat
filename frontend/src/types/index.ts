@@ -6,7 +6,7 @@ export interface WSMessage {
 
 export interface Message {
   id: string
-  role: 'user' | 'assistant' | 'system' | 'error'
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'error'
   content: string
   toolCalls?: ToolCall[]
   timestamp: number

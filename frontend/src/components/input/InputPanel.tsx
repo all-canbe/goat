@@ -19,7 +19,7 @@ export default function InputPanel() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const pendingQuestion = activeState?.pendingQuestion ?? null
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const sessionId = activeSessionId || 'default'
     if (pendingQuestion) {
       const trimmed = text.trim()
@@ -42,6 +42,12 @@ export default function InputPanel() {
     if (!trimmed && attachments.length === 0) return
     if (isStreaming) return
 
+    const sStore = useSessionStore.getState()
+    if (!sStore.activeSessionId) {
+      await sStore.createSession()
+    }
+    const realSessionId = useSessionStore.getState().activeSessionId ?? sessionId
+
     let finalText = trimmed
     if (attachments.length > 0) {
       const filesPart = attachments.map(a => `📄 \`${a.path}\``).join('\n')
@@ -49,26 +55,26 @@ export default function InputPanel() {
     }
 
     const store = useChatStore.getState()
-    store.clearStream(sessionId)
-    store.addMessage(sessionId, {
+    store.clearStream(realSessionId)
+    store.addMessage(realSessionId, {
       id: crypto.randomUUID(),
       role: 'user',
       content: finalText,
       timestamp: Date.now(),
     })
-    store.appendStreamToken(sessionId, '')
+    store.appendStreamToken(realSessionId, '')
 
     const wsClient = (window as any).__wsClient
     if (wsClient) {
-      wsClient.send('chat.send', { text: finalText, sessionId })
+      wsClient.send('chat.send', { text: finalText, sessionId: realSessionId })
     } else {
-      store.addMessage(sessionId, {
+      store.addMessage(realSessionId, {
         id: crypto.randomUUID(),
         role: 'error',
         content: 'WebSocket 连接未就绪，请刷新页面重试',
         timestamp: Date.now(),
       })
-      store.clearStream(sessionId)
+      store.clearStream(realSessionId)
     }
 
     setText('')

@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Bot, Copy, Check } from 'lucide-react'
 import { useState } from 'react'
@@ -25,34 +26,43 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   )
 }
 
+export function AssistantMessageContent({ content }: AssistantMessageProps) {
+  return (
+    <div className="prose prose-invert prose-sm max-w-none">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        components={{
+          code({ className, children, ...props }) {
+            const isInline = !className
+            if (isInline) {
+              return <code className="bg-surface-light px-1 py-0.5 rounded text-sm" {...props}>{children}</code>
+            }
+            return <CodeBlock className={className}>{children}</CodeBlock>
+          },
+          table({ children }) {
+            return <div className="overflow-x-auto"><table className="min-w-full border-collapse border border-surface-light">{children}</table></div>
+          },
+          th({ children }) {
+            return <th className="border border-surface-light px-3 py-2 bg-surface text-left text-sm font-medium">{children}</th>
+          },
+          td({ children }) {
+            return <td className="border border-surface-light px-3 py-2 text-sm">{children}</td>
+          },
+        }}
+      >{content}</ReactMarkdown>
+    </div>
+  )
+}
+
 export default function AssistantMessage({ content }: AssistantMessageProps) {
   return (
     <div className="flex gap-3 px-4 py-3 bg-surface/50">
       <div className="w-6 h-6 rounded bg-primary-dim/50 flex items-center justify-center flex-shrink-0 mt-0.5">
         <Bot size={14} className="text-primary" />
       </div>
-      <div className="flex-1 min-w-0 prose prose-invert prose-sm max-w-none">
-        <ReactMarkdown
-          rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-          components={{
-            code({ className, children, ...props }) {
-              const isInline = !className
-              if (isInline) {
-                return <code className="bg-surface-light px-1 py-0.5 rounded text-sm" {...props}>{children}</code>
-              }
-              return <CodeBlock className={className}>{children}</CodeBlock>
-            },
-            table({ children }) {
-              return <div className="overflow-x-auto"><table className="min-w-full border-collapse border border-surface-light">{children}</table></div>
-            },
-            th({ children }) {
-              return <th className="border border-surface-light px-3 py-2 bg-surface text-left text-sm font-medium">{children}</th>
-            },
-            td({ children }) {
-              return <td className="border border-surface-light px-3 py-2 text-sm">{children}</td>
-            },
-          }}
-        >{content}</ReactMarkdown>
+      <div className="flex-1 min-w-0">
+        <AssistantMessageContent content={content} />
       </div>
     </div>
   )

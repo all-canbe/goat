@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Bot } from 'lucide-react'
 
 interface StreamingBubbleProps {
@@ -24,7 +25,7 @@ export default function StreamingBubble({ content }: StreamingBubbleProps) {
       <div className="flex-1 min-w-0">
         {content ? (
           <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
             <span className="inline-block w-2 h-4 bg-primary-light animate-pulse ml-0.5 align-middle" />
           </div>
         ) : (

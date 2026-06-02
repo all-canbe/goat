@@ -1,8 +1,9 @@
+import { Bot } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import { useAutoScroll } from '@/hooks/useAutoScroll'
 import SearchBar from '@/components/search/SearchBar'
 import UserMessage from './UserMessage'
-import AssistantMessage from './AssistantMessage'
+import { AssistantMessageContent } from './AssistantMessage'
 import SystemMessage from './SystemMessage'
 import ErrorMessage from './ErrorMessage'
 import StreamingBubble from './StreamingBubble'
@@ -36,15 +37,20 @@ export default function MessageList() {
             {msg.role === 'user' ? (
               <UserMessage content={msg.content} />
             ) : msg.role === 'assistant' ? (
-              <>
-                {msg.toolCalls?.map((tc, i) => (
-                  <ToolCallCard key={i} toolCall={tc} />
-                ))}
-                <AssistantMessage content={msg.content} />
-              </>
+              <div className="flex gap-3 px-4 py-3 bg-surface/50">
+                <div className="w-6 h-6 rounded bg-primary-dim/50 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <Bot size={14} className="text-primary" />
+                </div>
+                <div className="flex-1 min-w-0 flex flex-col gap-2">
+                  {msg.toolCalls?.map((tc, i) => (
+                    <ToolCallCard key={i} toolCall={tc} />
+                  ))}
+                  {msg.content && <AssistantMessageContent content={msg.content} />}
+                </div>
+              </div>
             ) : msg.role === 'system' ? (
               <SystemMessage content={msg.content} />
-            ) : (
+            ) : msg.role === 'tool' ? null : (
               <ErrorMessage content={msg.content} />
             )}
           </div>
