@@ -431,6 +431,39 @@ def copy_file(source: str, destination: str) -> str:
 
 
 @tool
+def save_plan_doc(filename: str, content: str) -> str:
+    """保存计划/分析文档到 .goat/doc/ 目录（Plan 模式专用）。
+    该工具只能写入 .goat/doc/ 目录，无法写入项目其他位置。
+    Plan 模式下可用，用于持久化规划产出，方便跨模式/跨对话复用。
+    Args:
+        filename: 文件名，建议使用有意义的名称，如 "project-analysis" 或 "plan-xxx.md"
+        content: 文档内容（markdown 格式）
+    """
+    safe_name = Path(filename).name
+    if not safe_name.endswith('.md'):
+        safe_name += '.md'
+
+    doc_dir = Path.cwd() / ".goat" / "doc"
+    doc_dir.mkdir(parents=True, exist_ok=True)
+
+    target = (doc_dir / safe_name).resolve()
+    doc_dir_resolved = doc_dir.resolve()
+    if not str(target).startswith(str(doc_dir_resolved)):
+        return f"错误: 文件名 '{filename}' 包含非法路径遍历，拒绝写入"
+
+    try:
+        target.write_text(content, encoding="utf-8")
+        lines = content.count("\n") + 1
+        return (
+            f"文档已保存: .goat/doc/{safe_name}\n"
+            f"  大小: {len(content)} 字符, {lines} 行\n"
+            f"  提示: 切换到执行模式后，AI 会自动发现此文件"
+        )
+    except Exception as e:
+        return f"错误: 保存文档失败: {e}"
+
+
+@tool
 def get_file_info(filepath: str) -> str:
     """获取文件或目录的详细信息?
     Args:
@@ -1654,6 +1687,15 @@ try:
     BUILTIN_TOOLS["apply_patch"] = APPLY_PATCH_TOOL
 except ImportError:
     pass
+
+try:
+    from goat.tools.find_skills_tool import FIND_SKILLS_TOOL
+    BUILTIN_TOOLS["find_skills"] = FIND_SKILLS_TOOL
+except ImportError:
+    pass
+
+# save_plan_doc 作为内置工具直接注册
+BUILTIN_TOOLS["save_plan_doc"] = save_plan_doc
 
 
 def get_all_tools() -> list:

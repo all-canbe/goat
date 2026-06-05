@@ -100,7 +100,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   loadSessionMessages: async (sessionId) => {
     const chatStore = useChatStore.getState()
-    chatStore.clearSession(sessionId)
+    chatStore.clearSessionKeepStream(sessionId)
     try {
       const res = await fetch(`/api/sessions/${sessionId}/messages`)
       const data = await res.json()

@@ -17,8 +17,23 @@ interface ConfigState {
   isLoading: boolean
   isSaving: boolean
   workspace: string
+  reviewProviderType: string
+  reviewBaseUrl: string
+  reviewModel: string
+  reviewApiKey: string
+  reviewModelEnabled: boolean
   loadConfig: () => Promise<void>
-  updateConfig: (config: { providerType?: string; baseUrl?: string; model?: string; apiKey?: string }) => Promise<void>
+  updateConfig: (config: {
+    providerType?: string
+    baseUrl?: string
+    model?: string
+    apiKey?: string
+    reviewProviderType?: string
+    reviewBaseUrl?: string
+    reviewModel?: string
+    reviewApiKey?: string
+    reviewModelEnabled?: boolean
+  }) => Promise<void>
   loadWorkspace: () => Promise<void>
   setWorkspace: (path: string) => Promise<boolean>
 }
@@ -32,6 +47,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   isSaving: false,
   workspace: '',
+  reviewProviderType: '',
+  reviewBaseUrl: '',
+  reviewModel: '',
+  reviewApiKey: '',
+  reviewModelEnabled: false,
 
   loadConfig: async () => {
     set({ isLoading: true })
@@ -39,12 +59,22 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const res = await fetch('/api/config')
       if (!res.ok) throw new Error(`Failed to load config: ${res.status}`)
       const data = await res.json()
+
+      const rvProviderType = data.review_provider_type ?? ''
+      const rvApiKey = data.review_api_key ?? ''
+      const rvModel = data.review_model ?? ''
+
       set({
         providerType: data.providerType ?? '',
         baseUrl: data.baseUrl ?? '',
         model: data.model ?? '',
         apiKey: data.apiKey ?? '',
         availableProviders: data.availableProviders ?? [],
+        reviewProviderType: rvProviderType,
+        reviewBaseUrl: data.review_base_url ?? '',
+        reviewModel: rvModel,
+        reviewApiKey: rvApiKey,
+        reviewModelEnabled: !!(rvProviderType || rvApiKey || rvModel),
       })
     } catch (e) {
       console.error('loadConfig error:', e)
@@ -58,22 +88,48 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({ isSaving: true })
     try {
       const current = get()
-      const body = {
+      const body: Record<string, unknown> = {
         provider_type: config.providerType ?? current.providerType,
         base_url: config.baseUrl ?? current.baseUrl,
         model: config.model ?? current.model,
         api_key: config.apiKey ?? current.apiKey,
       }
+
+      // review 字段
+      if (config.reviewModelEnabled !== undefined) {
+        body.review_model_enabled = config.reviewModelEnabled
+      }
+      if (config.reviewProviderType !== undefined) {
+        body.review_provider_type = config.reviewProviderType
+      }
+      if (config.reviewBaseUrl !== undefined) {
+        body.review_base_url = config.reviewBaseUrl
+      }
+      if (config.reviewModel !== undefined) {
+        body.review_model = config.reviewModel
+      }
+      if (config.reviewApiKey !== undefined) {
+        body.review_api_key = config.reviewApiKey
+      }
+
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (!res.ok) throw new Error(`Failed to update config: ${res.status}`)
-      if (config.providerType) set({ providerType: config.providerType })
-      if (config.baseUrl) set({ baseUrl: config.baseUrl })
-      if (config.model) set({ model: config.model })
-      if (config.apiKey) set({ apiKey: config.apiKey })
+
+      set({
+        providerType: config.providerType ?? current.providerType,
+        baseUrl: config.baseUrl ?? current.baseUrl,
+        model: config.model ?? current.model,
+        apiKey: config.apiKey ?? current.apiKey,
+        reviewProviderType: config.reviewProviderType ?? current.reviewProviderType,
+        reviewBaseUrl: config.reviewBaseUrl ?? current.reviewBaseUrl,
+        reviewModel: config.reviewModel ?? current.reviewModel,
+        reviewApiKey: config.reviewApiKey ?? current.reviewApiKey,
+        reviewModelEnabled: config.reviewModelEnabled ?? current.reviewModelEnabled,
+      })
     } catch (e) {
       console.error('updateConfig error:', e)
       throw e

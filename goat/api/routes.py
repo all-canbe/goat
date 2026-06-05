@@ -46,6 +46,29 @@ async def get_config():
     cfg = web_chat_handler.provider_config
     raw_key = cfg.api_key or ""
     masked = raw_key[:4] + "****" + raw_key[-4:] if len(raw_key) > 8 else "****"
+
+    # ---- 审查模型字段 ----
+    rev_cfg = web_chat_handler.get_review_provider_config()
+    review_fields = {}
+    if rev_cfg:
+        rk = rev_cfg.api_key or ""
+        rk_masked = rk[:4] + "****" + rk[-4:] if len(rk) > 8 else "****"
+        review_fields = {
+            "review_provider_type": rev_cfg.provider_type.value,
+            "review_base_url": rev_cfg.base_url or "",
+            "review_model": rev_cfg.model or "",
+            "review_api_key": rk_masked,
+            "review_model_enabled": True,
+        }
+    else:
+        review_fields = {
+            "review_provider_type": "",
+            "review_base_url": "",
+            "review_model": "",
+            "review_api_key": "",
+            "review_model_enabled": False,
+        }
+
     return {
         "provider_type": cfg.provider_type.value,
         "base_url": cfg.base_url or "",
@@ -53,6 +76,7 @@ async def get_config():
         "api_key": masked,
         "availableProviders": get_available_providers(),
         "mode": "Agent",
+        **review_fields,
     }
 
 
@@ -60,6 +84,8 @@ async def get_config():
 async def update_config(payload: dict):
     if web_chat_handler is None:
         return {"success": False, "error": "WebChatHandler not initialized"}
+
+    # ---- 主模型配置 ----
     provider_type_str = payload.get("provider_type", "openai_compatible")
     provider_type = parse_provider(provider_type_str) or ProviderType.OPENAI_COMPATIBLE
     new_config = ProviderConfig(
@@ -70,6 +96,25 @@ async def update_config(payload: dict):
     )
     web_chat_handler.provider_config = new_config
     web_chat_handler.llm = create_llm(new_config)
+
+    # ---- 审查模型配置 ----
+    review_enabled = payload.get("review_model_enabled", None)
+    if review_enabled is False:
+        web_chat_handler.update_review_config(None)
+    elif review_enabled is True:
+        rv_type = parse_provider(payload.get("review_provider_type", "")) or provider_type
+        rv_api_key = payload.get("review_api_key", "")
+        rv_base_url = payload.get("review_base_url", "")
+        rv_model = payload.get("review_model", "")
+        if rv_api_key or rv_model:
+            review_config = ProviderConfig(
+                provider_type=rv_type,
+                api_key=rv_api_key,
+                base_url=rv_base_url,
+                model=rv_model,
+            )
+            web_chat_handler.update_review_config(review_config)
+
     return {"success": True}
 
 
@@ -442,6 +487,28 @@ async def export_session(session_id: str, format: str = Query("json")):
         "sessionId": session_id,
         "messages": [{"id": m.id, "role": m.role, "content": m.content, "createdAt": m.created_at} for m in messages],
     }
+
+
+@router.get("/files/children")
+async def get_file_children(path: str = Query(...)):
+    """返回指定目录的直接子节点（仅一层，不含递归）"""
+    children: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower()))
+        for entry in entries:
+            if entry.name.startswith('.') or entry.name in ('node_modules', '__pycache__', '.git', 'dist', 'build'):
+                continue
+            node: dict[str, Any] = {
+                "name": entry.name,
+                "path": entry.path.replace("\\", "/"),
+                "type": "directory" if entry.is_dir() else "file",
+            }
+            if entry.is_dir():
+                node["children"] = []
+            children.append(node)
+    except (PermissionError, OSError):
+        pass
+    return {"children": children}
 
 
 @router.get("/files/tree")

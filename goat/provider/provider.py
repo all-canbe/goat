@@ -65,6 +65,7 @@ class ProviderConfig:
     base_url: str = ""
     temperature: float = 0.7
     max_tokens: int | None = None
+    timeout: int | None = None
 
     def __post_init__(self) -> None:
         defaults = PROVIDER_DEFAULTS.get(self.provider_type.value, {})
@@ -94,11 +95,15 @@ class BaseProvider(ABC):
 
 class OpenAICompatibleProvider(BaseProvider):
     def create_llm(self, config: ProviderConfig) -> ChatOpenAI:
+        # 隐式默认值: max_tokens=16384, timeout=300(5分钟)
+        # 用户可在 setting.json 中通过 max_tokens/timeout 字段显式覆盖
         return ChatOpenAI(
             base_url=config.base_url,
             api_key=config.api_key,
             model=config.model,
             temperature=config.temperature,
+            max_tokens=config.max_tokens if config.max_tokens is not None else 16384,
+            timeout=config.timeout if config.timeout is not None else 300,
         )
 
     def get_default_model(self) -> str:

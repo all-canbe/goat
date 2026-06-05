@@ -6,12 +6,16 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from goat.conversation.conversation_manager import ConversationManager
 from goat.conversation.context_compression import CompactionConfig
 from goat.core.event_bus import EventBus, EventType
-from goat.core.workspace import get_goat_home, get_skills_dir
+from goat.core.workspace import (
+    get_goat_home, get_skills_dir, get_workspace_goat_dir,
+    ensure_workspace_goat_layout,
+)
 from goat.agent.skill_system import SkillRegistry
 from goat.provider.provider import (
     ProviderConfig, ProviderType, create_llm, parse_provider,
@@ -20,6 +24,7 @@ from goat.provider.provider import (
 from goat.security.approval import PermissionMode
 
 from goat.api.session_engine import SessionEngine
+from goat.api.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,10 @@ class SessionManager:
         self._initialized = False
         self._current_mode: PermissionMode | None = None
         self.skill_registry = SkillRegistry()
+        self.review_provider_config: ProviderConfig | None = None
+        self.review_llm: BaseChatModel | None = None
+        self._flow_plan_event: asyncio.Event | None = None
+        self._flow_plan_choice: str = ""
 
     async def initialize(self, workspace: str | None = None) -> None:
         if workspace:
@@ -108,9 +117,29 @@ class SessionManager:
             base_url=settings.get("base_url", ""),
             api_key=settings["api_key"],
             model=settings.get("model", ""),
+            max_tokens=settings.get("max_tokens"),
+            timeout=settings.get("timeout"),
         )
 
         self.llm = create_llm(self.provider_config)
+
+        # ---- 加载审查模型（Flow 模式用） ----
+        review_settings = _load_settings_safe()
+        if review_settings.get("review_api_key"):
+            try:
+                self.review_provider_config = ProviderConfig(
+                    provider_type=parse_provider(review_settings.get("review_provider", ""))
+                        or self.provider_config.provider_type,
+                    base_url=review_settings.get("review_base_url", self.provider_config.base_url),
+                    api_key=review_settings["review_api_key"],
+                    model=review_settings.get("review_model", self.provider_config.model),
+                )
+                self.review_llm = create_llm(self.review_provider_config)
+                logger.info("审查模型已加载: %s", review_settings.get("review_model", "(default)"))
+            except Exception as e:
+                logger.warning("审查模型加载失败，使用主模型: %s", e)
+                self.review_provider_config = None
+                self.review_llm = None
 
         self.conversations = ConversationManager(
             db_path=_get_db_path(),
@@ -126,12 +155,37 @@ class SessionManager:
             ),
         )
 
-        skills_dir = get_skills_dir()
-        if skills_dir.exists():
-            self.skill_registry.load_skills_from_directory(skills_dir)
-            loaded = self.skill_registry.list_all()
-            if loaded:
-                logger.info("加载了 %d 个技能: %s", len(loaded), [s.name for s in loaded])
+        # ---- 全局 + 项目 Skill 合并加载（Claude Code 模式） ----
+        # 优先级：项目 .goat/skills > get_skills_dir > 包内 skills > ~/.goat/skills
+        _pkg_root = Path(__file__).resolve().parent.parent.parent
+        _goat_dir = ensure_workspace_goat_layout(self.workspace)
+        _workspace_skills = _goat_dir / "skills"
+        _user_skills = GOAT_HOME / "skills"
+        _user_skills.mkdir(parents=True, exist_ok=True)
+        _skill_candidates = [
+            _workspace_skills,
+            get_skills_dir(),
+            _pkg_root / "skills",
+            _user_skills,
+        ]
+        _loaded_dirs: set[Path] = set()
+        for _d in _skill_candidates:
+            if _d in _loaded_dirs or not _d.exists():
+                continue
+            _loaded = self.skill_registry.load_skills_from_directory(_d)
+            _loaded_dirs.add(_d)
+            if _loaded:
+                logger.info("从 %s 加载了 %d 个技能: %s", _d, len(_loaded), [s.name for s in _loaded])
+
+        # 内置回退：不论目录扫描结果如何，确保 kz-skill-creator 存在
+        if not self.skill_registry.get("kz-skill-creator"):
+            _kz_dir = _pkg_root / "skills" / "kz-skill-creator"
+            if _kz_dir.exists():
+                from goat.agent.skill_system import load_skill_from_directory
+                _s = load_skill_from_directory(_kz_dir)
+                if _s:
+                    self.skill_registry.register(_s)
+                    logger.info("已注册内置回退技能 kz-skill-creator")
 
         from goat.tools.retry import init_retry
         init_retry(self.event_bus)
@@ -149,6 +203,7 @@ class SessionManager:
         if not p.is_dir():
             return False, f"路径不是目录: {path}"
         self.workspace = p
+        ensure_workspace_goat_layout(p)
         _save_settings({"workspace": str(p)})
         for engine in self._engines.values():
             engine.close()
@@ -166,6 +221,11 @@ class SessionManager:
             logger.error("SessionManager 未初始化，无法处理消息")
             return
 
+        # 检测 /flow_plan 命令，走独立流水线
+        if text.strip().startswith("/flow_plan"):
+            await self.handle_flow_plan(text, session_id)
+            return
+
         engine = await self._get_or_create_engine(session_id)
         if engine.is_running:
             logger.warning("Session %s 已有运行中的 Agent", session_id[:8])
@@ -176,6 +236,88 @@ class SessionManager:
             )
             return
         await engine.start(text)
+        # 通知前端刷新会话列表（可能有自动命名或新会话创建）
+        await ws_manager.broadcast_to_all({
+            "type": "session.list.update",
+            "payload": {}
+        })
+
+    async def handle_flow_plan(self, text: str, session_id: str = "default") -> None:
+        """处理 /flow_plan 命令：计划生成 → 审查 → 用户选择 → YOLO 执行"""
+        if not self._initialized:
+            logger.error("SessionManager 未初始化")
+            return
+
+        task = text
+        if task.startswith("/flow_plan"):
+            task = task[len("/flow_plan"):].strip()
+        if not task:
+            await ws_manager.broadcast_to_session(session_id, {
+                "type": "system.error",
+                "payload": {"message": "用法: /flow_plan <任务描述>"}
+            })
+            return
+
+        from goat.agent.pipeline import FlowPipeline
+        from goat.agent.subagent_manager import SubAgentManager
+        from goat.core.cancellation import CancellationToken
+        from goat.tools.tools import get_tools_by_names
+        from goat.agent.subagent_roles import ROLE_REGISTRY, RoleType
+
+        manager = SubAgentManager()
+        cancel_token = CancellationToken()
+        review_llm = self.review_llm or self.llm
+
+        pipeline = FlowPipeline(
+            impl_llm=self.llm,
+            review_llm=review_llm,
+            manager=manager,
+            skill_registry=self.skill_registry,
+            event_bus=self.event_bus,
+            cancel_token=cancel_token,
+        )
+
+        async def plan_gate_handler(phase: str, info: dict):
+            if phase == "plan_compare":
+                self._flow_plan_event = asyncio.Event()
+                await ws_manager.broadcast_to_session(session_id, {
+                    "type": "flow.plan_compare",
+                    "payload": {
+                        "task": info.get("task", ""),
+                        "original_plan": info.get("original_plan", ""),
+                        "reviewed_plan": info.get("reviewed_plan", ""),
+                    }
+                })
+                try:
+                    await asyncio.wait_for(
+                        self._flow_plan_event.wait(),
+                        timeout=300.0,
+                    )
+                except asyncio.TimeoutError:
+                    self._flow_plan_choice = "cancelled"
+                finally:
+                    self._flow_plan_event = None
+                return self._flow_plan_choice
+            return "reviewed"
+
+        pipeline.gate_callback = plan_gate_handler
+
+        report = await pipeline.run_plan_first(task)
+
+        await ws_manager.broadcast_to_session(session_id, {
+            "type": "flow.plan_result",
+            "payload": {
+                "choice": report.choice,
+                "success": report.success,
+                "summary": report.summary,
+                "verification_errors": report.verification_errors,
+            }
+        })
+
+    def submit_flow_plan_choice(self, choice: str) -> None:
+        self._flow_plan_choice = choice
+        if self._flow_plan_event:
+            self._flow_plan_event.set()
 
     async def cancel_session(self, session_id: str) -> None:
         engine = self._engines.get(session_id)
@@ -196,7 +338,46 @@ class SessionManager:
             if self._current_mode and engine.approval_system:
                 engine.approval_system.set_mode(self._current_mode)
             self._engines[session_id] = engine
+            # 通知前端新会话已创建
+            await ws_manager.broadcast_to_all({
+                "type": "session.list.update",
+                "payload": {}
+            })
         return self._engines[session_id]
+
+    def get_review_llm(self) -> BaseChatModel:
+        """返回 review llm，未配置时退化为主 llm。"""
+        return self.review_llm or self.llm
+
+    def get_review_provider_config(self) -> ProviderConfig | None:
+        """供 /api/config GET 使用。"""
+        return self.review_provider_config
+
+    def update_review_config(self, review_config: ProviderConfig | None) -> None:
+        """更新审查模型配置：保存 setting.json + 更新运行时引用。"""
+        if review_config is None:
+            self.review_provider_config = None
+            self.review_llm = None
+            if SETTINGS_FILE.exists():
+                try:
+                    data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                    for key in ("review_model", "review_api_key", "review_base_url",
+                                "review_provider", "review_model_prompted"):
+                        data.pop(key, None)
+                    SETTINGS_FILE.write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                except (OSError, json.JSONDecodeError) as e:
+                    logger.warning("清空审查配置失败: %s", e)
+            return
+
+        self.review_provider_config = review_config
+        self.review_llm = create_llm(review_config)
+        _save_settings({
+            "review_provider": review_config.provider_type.value,
+            "review_base_url": review_config.base_url,
+            "review_api_key": review_config.api_key,
+            "review_model": review_config.model,
+        })
 
 
 session_manager = SessionManager()

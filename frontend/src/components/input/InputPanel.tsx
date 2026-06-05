@@ -1,12 +1,9 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react'
-import { Send, Square, File, X } from 'lucide-react'
+import { Send, Square } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
-
-interface FileAttachment {
-  path: string
-  name: string
-}
+import AttachmentChip from '@/components/chat/AttachmentChip'
+import type { FileAttachment } from '@/types'
 
 export default function InputPanel() {
   const [text, setText] = useState('')
@@ -59,10 +56,12 @@ export default function InputPanel() {
     store.addMessage(realSessionId, {
       id: crypto.randomUUID(),
       role: 'user',
-      content: finalText,
+      content: trimmed,  // 纯用户文本,不包含 📄 引用
+      attachments: attachments.length > 0 ? [...attachments] : undefined,
       timestamp: Date.now(),
     })
-    store.appendStreamToken(realSessionId, '')
+    store.setLastUserInput(realSessionId, trimmed, [...attachments])
+    store.startStream(realSessionId)
 
     const wsClient = (window as any).__wsClient
     if (wsClient) {
@@ -89,6 +88,13 @@ export default function InputPanel() {
       textRef.current = ''
       triggeredRef.current = false
     }
+    win.__setInputText = (value: string) => {
+      setText(value)
+      textRef.current = value
+    }
+    win.__focusInput = () => {
+      textareaRef.current?.focus()
+    }
     win.__commandPaletteClose = () => {
       if (!textRef.current.startsWith('/')) {
         triggeredRef.current = false
@@ -97,10 +103,59 @@ export default function InputPanel() {
     win.__addFileToInput = (path: string, name: string) => {
       setAttachments(prev => [...prev, { path, name }])
     }
+    win.__addSkillToInput = (skillName: string) => {
+      const prefix = `请应用 \`${skillName}\` 技能处理以下任务：`
+      setText(prev => {
+        const newText = prev ? `${prev}\n${prefix}` : prefix
+        return newText
+      })
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current
+        if (ta) {
+          ta.focus()
+          ta.selectionStart = ta.selectionEnd = ta.value.length
+        }
+      })
+    }
+    win.__retryLast = () => {
+      const sid = useSessionStore.getState().activeSessionId || 'default'
+      const st = useChatStore.getState().sessions[sid]
+      if (!st?.lastUserText) return
+
+      const trimmed = st.lastUserText
+      const attachFiles = st.lastAttachments || []
+      const finalText = attachFiles.length > 0
+        ? trimmed + '\n' + attachFiles.map(a => `📄 \`${a.path}\``).join('\n')
+        : trimmed
+
+      const store = useChatStore.getState()
+      store.clearStreamError(sid)
+      store.clearStream(sid)
+
+      const realSessionId = useSessionStore.getState().activeSessionId ?? sid
+      store.addMessage(realSessionId, {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: trimmed,
+        attachments: attachFiles.length > 0 ? [...attachFiles] : undefined,
+        timestamp: Date.now(),
+      })
+      store.setLastUserInput(realSessionId, trimmed, [...attachFiles])
+      store.startStream(realSessionId)
+
+      const wsClient = (window as any).__wsClient
+      if (wsClient) {
+        wsClient.send('chat.send', { text: finalText, sessionId: realSessionId })
+      }
+    }
     return () => {
       delete win.__clearInput
+      delete win.__setInputText
+      delete win.__focusInput
       delete win.__commandPaletteClose
       delete win.__addFileToInput
+      delete win.__addSkillToInput
+      delete win.__retryLast
     }
   }, [])
 
@@ -126,19 +181,11 @@ export default function InputPanel() {
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-2">
           {attachments.map((att) => (
-            <span
+            <AttachmentChip
               key={att.path}
-              className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-500/10 text-emerald-400 rounded text-xs"
-            >
-              <File size={12} />
-              <span className="max-w-[120px] truncate">{att.name}</span>
-              <button
-                onClick={() => setAttachments((prev) => prev.filter((a) => a.path !== att.path))}
-                className="hover:text-emerald-200 transition-colors"
-              >
-                <X size={12} />
-              </button>
-            </span>
+              attachment={att}
+              onRemove={() => setAttachments((prev) => prev.filter((a) => a.path !== att.path))}
+            />
           ))}
         </div>
       )}

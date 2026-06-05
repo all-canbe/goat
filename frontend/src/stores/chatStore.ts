@@ -1,12 +1,16 @@
 import { create } from 'zustand'
-import type { Message, PendingApproval, PendingQuestion, ToolCall } from '@/types'
+import type { Message, PendingApproval, PendingQuestion, PendingPlanCompare, ToolCall, FileAttachment } from '@/types'
 
 interface SessionChatState {
   messages: Message[]
   streamingContent: string
   isStreaming: boolean
+  streamError: string | null
+  lastUserText: string | null
+  lastAttachments: FileAttachment[]
   pendingApproval: PendingApproval | null
   pendingQuestion: PendingQuestion | null
+  pendingPlanCompare: PendingPlanCompare | null
   pendingToolCalls: ToolCall[]
 }
 
@@ -15,8 +19,12 @@ function getInitialState(): SessionChatState {
     messages: [],
     streamingContent: '',
     isStreaming: false,
+    streamError: null,
+    lastUserText: null,
+    lastAttachments: [],
     pendingApproval: null,
     pendingQuestion: null,
+    pendingPlanCompare: null,
     pendingToolCalls: [],
   }
 }
@@ -40,15 +48,22 @@ interface ChatStore {
 
   addMessage: (sessionId: string, msg: Message) => void
   appendStreamToken: (sessionId: string, token: string) => void
-  commitStream: (sessionId: string, messageId: string) => void
+  startStream: (sessionId: string) => void
+  commitStream: (sessionId: string, messageId: string, contentOverride?: string) => void
   clearStream: (sessionId: string) => void
   clearSession: (sessionId: string) => void
+  clearSessionKeepStream: (sessionId: string) => void
   removeSession: (sessionId: string) => void
 
   setPendingApproval: (sessionId: string, approval: PendingApproval | null) => void
   setPendingQuestion: (sessionId: string, question: PendingQuestion | null) => void
+  setPendingPlanCompare: (sessionId: string, planCompare: PendingPlanCompare | null) => void
   addToolCall: (sessionId: string, toolCall: ToolCall) => void
   clearToolCalls: (sessionId: string) => void
+
+  setStreamError: (sessionId: string, error: string | null) => void
+  clearStreamError: (sessionId: string) => void
+  setLastUserInput: (sessionId: string, text: string, attachments: FileAttachment[]) => void
 
   searchQuery: string
   searchResults: number[]
@@ -91,15 +106,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => {
       const updated = { ...state.sessions }
       const s = ensureState(updated, sessionId)
+      // 空 token 不应启动流式占位(避免假启动);保留现有 streamingContent
+      if (!token) return { sessions: updated }
       updated[sessionId] = { ...s, streamingContent: s.streamingContent + token, isStreaming: true }
       return { sessions: updated }
     }),
 
-  commitStream: (sessionId, messageId) => {
+  startStream: (sessionId) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, isStreaming: true, streamError: null }
+      return { sessions: updated }
+    }),
+
+  commitStream: (sessionId, messageId, contentOverride) => {
     const { sessions } = get()
     const s = sessions[sessionId]
-    if (!s || (!s.streamingContent && !s.isStreaming)) return
-    const content = s.streamingContent || '(空回复)'
+    // 仅在 session 完全不存在时返回;即使内容空/未 streaming,后端主动 chat.response 仍要处理
+    if (!s) return
+    // 优先使用 override(后端 chat.response 直接带来的完整 content),否则用 streamingContent
+    const content = (s.streamingContent && s.streamingContent.trim())
+      ? s.streamingContent
+      : (contentOverride && contentOverride.trim())
+        ? contentOverride
+        : (s.streamingContent || '(空回复)')
     const toolCalls = s.pendingToolCalls.length > 0 ? s.pendingToolCalls : undefined
     const msg: Message = {
       id: messageId || crypto.randomUUID(),
@@ -114,8 +145,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: [...(updated[sessionId]?.messages ?? []), msg],
         streamingContent: '',
         isStreaming: false,
+        streamError: null,
+        lastUserText: null,
+        lastAttachments: [],
         pendingApproval: null,
         pendingQuestion: null,
+        pendingPlanCompare: null,
         pendingToolCalls: [],
       }
       return { sessions: updated }
@@ -127,7 +162,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const updated = { ...state.sessions }
       const s = updated[sessionId]
       if (s) {
-        updated[sessionId] = { ...s, streamingContent: '', isStreaming: false }
+        updated[sessionId] = { ...s, streamingContent: '', isStreaming: false, streamError: null, lastUserText: null, lastAttachments: [] }
       }
       return { sessions: updated }
     }),
@@ -136,6 +171,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => {
       const updated = { ...state.sessions }
       updated[sessionId] = getInitialState()
+      return { sessions: updated }
+    }),
+
+  clearSessionKeepStream: (sessionId) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = updated[sessionId]
+      if (s) {
+        updated[sessionId] = { ...s, messages: [] }
+      } else {
+        updated[sessionId] = { ...getInitialState(), messages: [] }
+      }
       return { sessions: updated }
     }),
 
@@ -162,6 +209,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return { sessions: updated }
     }),
 
+  setPendingPlanCompare: (sessionId, planCompare) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingPlanCompare: planCompare }
+      return { sessions: updated }
+    }),
+
   addToolCall: (sessionId, toolCall) =>
     set((state) => {
       const updated = { ...state.sessions }
@@ -175,6 +230,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const updated = { ...state.sessions }
       const s = ensureState(updated, sessionId)
       updated[sessionId] = { ...s, pendingToolCalls: [] }
+      return { sessions: updated }
+    }),
+
+  setStreamError: (sessionId, error) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, streamError: error, isStreaming: error !== null ? true : s.isStreaming, streamingContent: error !== null ? '' : s.streamingContent }
+      return { sessions: updated }
+    }),
+
+  clearStreamError: (sessionId) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = updated[sessionId]
+      if (s) {
+        updated[sessionId] = { ...s, streamError: null }
+      }
+      return { sessions: updated }
+    }),
+
+  setLastUserInput: (sessionId, text, attachments) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, lastUserText: text, lastAttachments: attachments }
       return { sessions: updated }
     }),
 

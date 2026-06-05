@@ -4,8 +4,11 @@ Goat Agent 工具，支持子 Agent 并行调度与对话管理。用法:
     # 运行 CLI
     goat
 
-    # 运行 TUI
-    goat_tui
+    # 运行 Web
+    goat web
+
+    # 运行 MCP 服务
+    goat mcp <serve|serve-sse|connect|list|add>
 
 启动后按提示输入 base_url、api_key、model 完成初始化，然后进入交互命令行，支持以下命令:
 
@@ -53,6 +56,7 @@ from goat.agent.subagent_roles import (
 )
 from goat.agent.subagent_runtime import (
     AgentContext, _run_agent_loop, _build_subagent_tools, MAX_AGENT_TURNS,
+    looks_like_final_answer, continuation_prompt,
 )
 from goat.agent.skill_system import (
     SkillRegistry, Skill,
@@ -64,11 +68,14 @@ from goat.tools.steps_tracker import StepsTracker
 from goat.tools.async_executor import execute_command_async
 from goat.conversation.conversation_manager import ConversationManager, SessionInfo
 from goat.core.event_bus import EventBus, EventType
-from goat.core.workspace import get_goat_home, get_skills_dir, resolve_workspace
+from goat.core.workspace import (
+    get_goat_home, get_skills_dir, resolve_workspace,
+    get_workspace_goat_dir, ensure_workspace_goat_layout,
+)
 from goat.tasks.durable_task_manager import (
     DurableTaskManager, TaskDef, TaskContext, TaskType, TaskStatus,
 )
-from goat.conversation.prompt_engine import engine as prompt_engine
+from goat.conversation.prompt_engine import engine as prompt_engine, reload_project_rules, _load_project_rules
 from goat.conversation.prompt_templates import (
     PLAN_MODE_DESCRIPTION, AGENT_MODE_DESCRIPTION,
     YOLO_MODE_DESCRIPTION, FLOW_MODE_DESCRIPTION,
@@ -82,9 +89,10 @@ from goat.security.approval import ToolApprovalSystem, PermissionMode, ApprovalP
 from goat.conversation.context_compression import CompactionConfig
 from goat.hooks.lifecycle import HookLifecycleSystem, HookDecision, HookConfigLoader
 from goat.agent.pipeline import (
-    FlowPipeline, FlowReport, is_complex_task,
+    FlowPipeline, FlowReport, PlanFirstReport, is_complex_task,
     has_mutation_tools, get_git_diff, run_mid_flow_review, _format_findings_text,
 )
+from goat.cli.input_handler import CLIInputHandler
 
 
 GOAT_HOME = get_goat_home()
@@ -123,16 +131,31 @@ HELP_TEXT = """模式说明:
 
   /plan                   切换到 Plan 模式 (只读)
   /agent                  切换到 Agent 模式 (每次确认)
-  /flow                   切换到 Flow 模式 (实现->审查->修复)
+  /flow                   切换到 Flow 模式 (实现→审查→修复)
+  /flow_plan <任务>        Flow 计划优先模式 (生成计划→审查→执行)
   /yolo                   切换到 YOLO 模式 (全部自动)
   /mode                   切换 Agent/命令模式
 
+  /vim                    切换 Vim 编辑模式
+  /clear                  清屏（保留会话历史）
   /cost                   查看 Token 消耗
+  /context                查看上下文使用情况
+  /compact                手动压缩上下文
   /status                 显示系统状态
   /help                   显示帮助
   /quit                   退出
 
+快捷键:
+  Enter                  提交输入
+  Shift+Enter            插入换行（多行）
+  Esc Enter              插入换行（备用）
+  Ctrl+R                 搜索历史命令
+  Tab                    补全文件路径 (@path 语法)
+  Ctrl+C                 取消当前输入
+
 提示: 输入 / 开头的命令，否则直接输入内容即为与 AI 对话
+
+文件引用: 在输入中使用 @文件路径 可引用文件内容
 """
 
 
@@ -156,6 +179,7 @@ class CLI:
         self.hook_system: HookLifecycleSystem | None = None
         self.pipeline: FlowPipeline | None = None
         self._event_listener_task: asyncio.Task | None = None
+        self.input_handler: CLIInputHandler | None = None
 
     def _load_settings(self) -> dict | None:
         try:
@@ -197,6 +221,17 @@ class CLI:
                 for k, v in existing.items():
                     if k not in data:
                         data[k] = v
+            SETTINGS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            print(f"  ⚠️ 配置保存失败: {e}")
+
+    def _set_setting_flag(self, key: str, value: bool | str | int) -> None:
+        """设置 setting.json 中的单个标志位（如 review_model_prompted）。"""
+        try:
+            data = {}
+            if SETTINGS_FILE.exists():
+                data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            data[key] = value
             SETTINGS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
             print(f"  ⚠️ 配置保存失败: {e}")
@@ -384,6 +419,21 @@ class CLI:
         )
         print(f"  始化完 {get_provider_display(self.provider_config)} | 并发上限: {max_concurrent} | 深度上限: {max_depth}\n")
 
+        # 加载项目规则并显示状态
+        rules_text = reload_project_rules()
+        if rules_text:
+            goat_personal = Path(".goat/GOAT.md").exists()
+            rules_dir = Path(".goat/rules")
+            rule_files = sorted(f.name for f in rules_dir.glob("*.md")) if rules_dir.exists() else []
+            parts = []
+            if goat_personal:
+                parts.append("个人规则")
+            for rf in rule_files:
+                parts.append(rf)
+            print(f"  📋 已加载项目规则: {', '.join(parts)}")
+        else:
+            print("  📋 未找到项目规则（可创建 .goat/GOAT.md 或 .goat/rules/*.md）")
+
         checkpoint = self.conversations.get_last_checkpoint()
         if checkpoint:
             print(f"  📌 发现上次退出时的会话断点")
@@ -447,7 +497,14 @@ class CLI:
         ))
 
     def _init_skills(self) -> None:
-        candidates = [get_skills_dir()]
+        # ---- 全局 + 项目 Skill 合并加载（Claude Code 模式） ----
+        # 优先级：项目 .goat/skills > get_skills_dir > ~/.goat/skills > 包内 skills
+        _goat_dir = ensure_workspace_goat_layout(self.workspace)
+        _workspace_skills = _goat_dir / "skills"
+        _user_skills = get_goat_home() / "skills"
+        _user_skills.mkdir(parents=True, exist_ok=True)
+
+        candidates: list[Path] = [_workspace_skills, get_skills_dir(), _user_skills]
         try:
             pkg_skills = Path(__file__).resolve().parent / "skills"
             if pkg_skills not in candidates:
@@ -455,20 +512,24 @@ class CLI:
         except Exception:
             pass
 
+        _loaded_dirs: set[Path] = set()
         for skills_dir in candidates:
-            if skills_dir.exists():
-                loaded = self.skill_registry.load_skills_from_directory(skills_dir)
-                if loaded:
-                    print(f"  📦 Loaded {len(loaded)} skills: {', '.join(s.name for s in loaded)}")
+            if skills_dir in _loaded_dirs or not skills_dir.exists():
+                continue
+            loaded = self.skill_registry.load_skills_from_directory(skills_dir)
+            _loaded_dirs.add(skills_dir)
+            if loaded:
+                print(f"  📦 Loaded {len(loaded)} skills from {skills_dir}: {', '.join(s.name for s in loaded)}")
 
-        if not self.skill_registry.get("skill-creator"):
-            sc_dir = Path(__file__).resolve().parent / "skills" / "skill-creator"
-            if sc_dir.exists():
+        # 内置回退：保证 kz-skill-creator 存在
+        if not self.skill_registry.get("kz-skill-creator"):
+            kz_dir = Path(__file__).resolve().parent / "skills" / "kz-skill-creator"
+            if kz_dir.exists():
                 from goat.agent.skill_system import load_skill_from_directory
-                sc = load_skill_from_directory(sc_dir)
-                if sc:
-                    self.skill_registry.register(sc)
-                    print(f"  📦 已注册初始技能 skill-creator")
+                kz = load_skill_from_directory(kz_dir)
+                if kz:
+                    self.skill_registry.register(kz)
+                    print(f"  📦 已注册初始技能 kz-skill-creator")
 
         if not self.skill_registry.list_all():
             from goat.tools.tools import BUILTIN_TOOLS as bt
@@ -508,16 +569,21 @@ class CLI:
     async def run(self) -> None:
         await self.initialize()
 
+        # 初始化 prompt_toolkit 输入处理器
+        self.input_handler = CLIInputHandler(
+            workspace_dir=str(self.workspace),
+        )
+
         self._event_listener_task = asyncio.create_task(self._event_listener())
 
         print("输入 /help 查看命令帮助，/quit 退出\n")
-        print("当前 [Agent 模式]，直接输入内容即可与 AI 对话\n")
+        print("当前 [Agent 模式]，直接输入内容即可与 AI 对话")
+        print("Enter 提交 | Esc+Enter 换行 | Ctrl+R 搜索历史 | Tab 补全文件路径\n")
 
         while self.running:
             try:
-                prefix = "🤖 > " if self.agent_mode else "🔧 > "
-                user_input = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: input(prefix).strip()
+                user_input = await self.input_handler.aprompt(
+                    agent_mode=self.agent_mode,
                 )
             except (EOFError, KeyboardInterrupt):
                 print("\n正在退.")
@@ -634,6 +700,49 @@ class CLI:
                 self._switch_model(args)
             case "/cost":
                 self._show_cost()
+            case "/context":
+                if not self.conversations:
+                    print("对话管理器未初始化")
+                    return
+                usage = self.conversations.get_token_usage()
+                print(f"🗂  上下文使用: {usage['total_tokens']:,} / {usage['max_tokens']:,} tokens")
+                pct = (usage['total_tokens'] / usage['max_tokens']) * 100 if usage['max_tokens'] > 0 else 0
+                bar_len = 30
+                filled = int(bar_len * pct / 100)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                print(f"  {bar} {pct:.1f}%")
+                print(f"  消息数: {usage['message_count']} 条")
+                cm = getattr(self.conversations, "_compression_manager", None)
+                if cm:
+                    from goat.conversation.context_compression import CompactionPhase
+                    phase_name = {
+                        CompactionPhase.MICRO: "微压缩",
+                        CompactionPhase.CONTEXT_COLLAPSE: "上下文折叠",
+                        CompactionPhase.SESSION_MEMORY: "会话记忆",
+                        CompactionPhase.FULL: "完整压缩",
+                    }.get(cm.phase, str(cm.phase.name))
+                    print(f"  压缩阶段: {phase_name}")
+                    est = cm.estimate_tokens()
+                    print(f"  估算 Token: {est.total:,}")
+                threshold = 80
+                if pct > threshold:
+                    print(f"  ⚠️  上下文使用率超过 {threshold}%，建议执行 /compact 压缩")
+            case "/compact":
+                if not self.conversations:
+                    print("对话管理器未初始化")
+                    return
+                cm = getattr(self.conversations, "_compression_manager", None)
+                if cm is None:
+                    print("上下文压缩系统未启用（需配置 CompactionConfig）")
+                    return
+                if not await cm.is_compact_needed():
+                    print("当前上下文无需压缩，使用率正常")
+                    return
+                print("正在压缩上下文...")
+                result = await self.conversations.compress_context()
+                usage = self.conversations.get_token_usage()
+                pct = (usage['total_tokens'] / usage['max_tokens']) * 100 if usage['max_tokens'] > 0 else 0
+                print(f"✅ 压缩完成 — 当前使用 {usage['total_tokens']:,} / {usage['max_tokens']:,} tokens ({pct:.1f}%)")
             case "/resume":
                 await self._resume_session(args)
             case "/fork":
@@ -642,6 +751,13 @@ class CLI:
                 self._show_status()
             case "/help":
                 print(HELP_TEXT)
+            case "/vim":
+                self.input_handler.vim_mode = not self.input_handler.vim_mode
+                print(f"Vim 模式: {'开' if self.input_handler.vim_mode else '关'}")
+            case "/clear":
+                import os as _os
+                _os.system("cls" if _os.name == "nt" else "clear")
+                print("已清屏（会话历史保留）")
             case "/mode":
                 self.agent_mode = not self.agent_mode
                 mode_name = "Agent" if self.agent_mode else "命令"
@@ -669,6 +785,9 @@ class CLI:
                 print("已切换到 [Flow 模式] 🔄")
                 print("  流程模式 - 复杂任务自动进入 实现->审查->修复 闭环")
                 print("  简单问题直接回答，不消耗审查 Token")
+                self._check_review_model_and_prompt()
+            case "/flow_plan":
+                await self._do_flow_plan(args)
             case "/sessions":
                 self._list_sessions()
             case "/session":
@@ -871,6 +990,8 @@ class CLI:
 
         print(f"\n🤖 gent 正在处理: {message[:80]}...\n")
 
+        continuation_count = 0  # 连续无工具调用计数，防止无限催促
+
         for turn in range(MAX_AGENT_TURNS):
             if self.cancel_token.is_cancelled():
                 print("⚠️ 任务被取消")
@@ -911,8 +1032,26 @@ class CLI:
                 self.token_tracker.record_turn(input_text, output_text)
 
             if not response.tool_calls:
-                content = str(response.content) if response.content else "(无内容)"
+                raw_content = str(response.content) if response.content else ""
+                content = raw_content if raw_content else "(无内容)"
                 print(flush=True)
+
+                # ── P0: 检测中途状态更新（非最终答案），自动催促 LLM 继续 ──
+                if not looks_like_final_answer(raw_content):
+                    continuation_count += 1
+                    if continuation_count <= CLI._MAX_CONTINUATION_PROMPTS:
+                        await self.conversations.add_message(response)
+                        await self.conversations.add_message(HumanMessage(
+                            content=continuation_prompt(continuation_count)
+                        ))
+                        print(f"    🔄 任务未完成，自动继续（{continuation_count}/{CLI._MAX_CONTINUATION_PROMPTS}）...", flush=True)
+                        continue
+                    else:
+                        print(f"    ⚠️ 连续 {CLI._MAX_CONTINUATION_PROMPTS} 次无工具调用，退出等待用户指令", flush=True)
+                        await self.conversations.add_message(response)
+                        return
+
+                continuation_count = 0  # 正常退出时重置计数
 
                 is_plan_mode = (
                     self.approval_system is not None
@@ -950,6 +1089,8 @@ class CLI:
                 return
 
             await self.conversations.add_message(response)
+
+            continuation_count = 0  # 有工具调用，重置连续无工具调用计数
 
             tool_name_map = {t.name: t for t in all_tools}
             for tc in response.tool_calls:
@@ -1090,7 +1231,7 @@ class CLI:
                 diff = get_git_diff()
                 if diff:
                     print("    🔍 Flow 审查变更...", flush=True)
-                    findings = await run_mid_flow_review(message, diff, self.llm)
+                    findings = await run_mid_flow_review(message, diff, self.review_llm)
                     if findings:
                         findings_text = _format_findings_text(findings)
                         review_msg = HumanMessage(
@@ -1111,6 +1252,8 @@ class CLI:
             )
             plan_path = self._save_plan(plan_content) if plan_content.strip() else None
             await self._handle_plan_approval(plan_path)
+
+    _MAX_CONTINUATION_PROMPTS = 3  # 连续无工具调用时的最大催促次数
 
     # ── P0: Stop Hook 务完成验证 ──
 
@@ -1258,6 +1401,165 @@ class CLI:
         print(f"✅ Agent 已启动 {agent.name} [{agent.agent_id}]")
         print(f"   角色: {role_type.value} | 任务: {task[:80]}")
 
+    def _check_review_model_and_prompt(self) -> None:
+        """检查审查模型是否与主模型相同，若是则提示用户配置独立审查模型（仅首次）。"""
+        settings = self._load_settings()
+        if settings and settings.get("review_model_prompted"):
+            return
+
+        same_model = (self.review_llm is self.llm)
+        if not same_model:
+            return
+
+        print(f"\n{'─'*50}")
+        print(f"  🔍 Flow 模式建议使用独立审查模型")
+        print(f"{'─'*50}")
+        print(f"  当前审查模型与执行模型相同: {self.provider_config.model}")
+        print(f"  使用独立审查模型可获得更客观的代码审查效果")
+        print()
+        print(f"  1. 复用主模型（直接继续）")
+        print(f"  2. 选择同 Provider 下其他模型")
+        print(f"  3. 独立配置（自定义 API Key/URL）")
+        print(f"  4. 不再提示")
+        print(f"  0. 取消")
+        choice = input(f"\n  请选择 (0-4): ").strip()
+
+        if choice == "0":
+            self.approval_system.set_mode(PermissionMode.DEFAULT)
+            print("  已取消 Flow 模式切换")
+            return
+        elif choice == "1":
+            self._set_setting_flag("review_model_prompted", True)
+            print("  审查模型将复用主模型")
+            return
+        elif choice == "2":
+            self._prompt_choose_review_model()
+        elif choice == "3":
+            self._prompt_independent_review_config()
+        elif choice == "4":
+            self._set_setting_flag("review_model_prompted", True)
+            print("  不再提示审查模型配置")
+            return
+        else:
+            print("  无效选择，继续使用主模型")
+
+    def _prompt_choose_review_model(self) -> None:
+        """让用户从同 Provider 的可用模型列表中选择审查模型。"""
+        from ..provider import get_available_providers
+        providers = get_available_providers()
+        current_provider_key = self.provider_config.provider_type.value
+
+        provider_info = None
+        for p in providers:
+            if p["key"] == current_provider_key:
+                provider_info = p
+                break
+
+        if not provider_info or not provider_info.get("models"):
+            print("  无法获取可用模型列表，请通过 /model 命令手动配置")
+            return
+
+        models = provider_info["models"]
+        print(f"\n  选择审查模型（Provider: {provider_info['display']}）:")
+        for i, m in enumerate(models, 1):
+            marker = " ← 当前主模型" if m == self.provider_config.model else ""
+            print(f"    {i}. {m}{marker}")
+        print(f"    {len(models) + 1}. 手动输入")
+        print(f"    0. 取消")
+
+        choice = input(f"\n  请选择 (1-{len(models) + 1}, 0 取消): ").strip()
+        if not choice or choice == "0":
+            return
+
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(models):
+                model = models[idx]
+            elif idx == len(models):
+                model = input("  请输入模型名称: ").strip()
+                if not model:
+                    return
+            else:
+                return
+        except (ValueError, IndexError):
+            model = input("  请输入模型名称: ").strip()
+            if not model:
+                return
+
+        self.review_llm = create_llm(ProviderConfig(
+            provider_type=self.provider_config.provider_type,
+            base_url=self.provider_config.base_url,
+            api_key=self.provider_config.api_key,
+            model=model,
+        ))
+        self.pipeline = FlowPipeline(
+            impl_llm=self.llm,
+            review_llm=self.review_llm,
+            manager=self.manager,
+            skill_registry=self.skill_registry,
+            event_bus=self.event_bus,
+            cancel_token=self.cancel_token,
+            approval_system=self.approval_system,
+            hook_system=self.hook_system,
+        )
+        self._save_settings(
+            self.provider_config.base_url,
+            self.provider_config.api_key,
+            self.provider_config.model,
+            self.manager.max_concurrent,
+            self.manager.max_spawn_depth,
+            provider=self.provider_config.provider_type.value,
+            review_model=model,
+            review_api_key=None,
+        )
+        self._set_setting_flag("review_model_prompted", True)
+        print(f"  审查模型已切换为: {model}")
+
+    def _prompt_independent_review_config(self) -> None:
+        """让用户独立配置审查模型的 API Key/URL。"""
+        print(f"\n  配置独立审查 Provider:")
+        print(f"  当前主模型: {self.provider_config.model}")
+        print(f"  当前 Base URL: {self.provider_config.base_url}")
+        rv_url = input(f"  审查 Base URL (回车使用主模型): ").strip() or self.provider_config.base_url
+        rv_key = input(f"  审查 API Key: ").strip()
+        if not rv_key:
+            print("  API Key 不能为空，取消配置")
+            return
+        rv_model = input(f"  审查模型名 (回车使用主模型 {self.provider_config.model}): ").strip() or self.provider_config.model
+
+        try:
+            self.review_llm = create_llm(ProviderConfig(
+                provider_type=self.provider_config.provider_type,
+                base_url=rv_url,
+                api_key=rv_key,
+                model=rv_model,
+            ))
+            self.pipeline = FlowPipeline(
+                impl_llm=self.llm,
+                review_llm=self.review_llm,
+                manager=self.manager,
+                skill_registry=self.skill_registry,
+                event_bus=self.event_bus,
+                cancel_token=self.cancel_token,
+                approval_system=self.approval_system,
+                hook_system=self.hook_system,
+            )
+            self._save_settings(
+                self.provider_config.base_url,
+                self.provider_config.api_key,
+                self.provider_config.model,
+                self.manager.max_concurrent,
+                self.manager.max_spawn_depth,
+                provider=self.provider_config.provider_type.value,
+                review_model=rv_model,
+                review_api_key=rv_key,
+                review_base_url=rv_url,
+            )
+            self._set_setting_flag("review_model_prompted", True)
+            print(f"  独立审查模型已配置: {rv_model} ({rv_url})")
+        except Exception as e:
+            print(f"  ⚠️ 审查模型配置失败: {e}")
+
     async def _do_flow(self, task: str) -> None:
         if not task:
             print("用法: /flow <任务描述>")
@@ -1275,6 +1577,30 @@ class CLI:
         print(f"  📝 任务: {task[:100]}")
         print(f"  📐 最大迭代 3 次")
         print(f"{'─'*50}")
+
+        async def gate_handler(phase: str, info: dict) -> bool:
+            if phase == "impl_complete":
+                print(f"\n  {'─'*48}")
+                print(f"  实现阶段完成 — {info.get('changes', '?')}")
+                if not info.get('verified', True):
+                    errs = info.get('verify_errors', [])
+                    print(f"  ⚠️ {len(errs)} 个验证错误已自动修复")
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input("  是否查看 diff 并继续审查? [Y/n]: ").strip().lower()
+                )
+                return resp in ("", "y", "yes")
+            if phase == "review_findings":
+                print(f"\n  {'─'*48}")
+                print(f"  审查发现 {info.get('count', 0)} 个问题")
+                if info.get('critical_count', 0) > 0:
+                    print(f"  ⚠️ 包含 {info.get('critical_count')} 个 CRITICAL 级别问题")
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input(f"  是否继续自动修复? [Y/n]: ").strip().lower()
+                )
+                return resp in ("", "y", "yes")
+            return True
+
+        self.pipeline.gate_callback = gate_handler
 
         report = await self.pipeline.run(task)
 
@@ -1296,6 +1622,66 @@ class CLI:
         print(f"  {report.summary}")
         print(f"  总计发现问题: {findings_count}")
         print(f"  状{'ASS' if report.success else 'ARTIAL (max iterations)'}")
+        print()
+
+    async def _do_flow_plan(self, task: str) -> None:
+        if not task:
+            print("用法: /flow_plan <任务描述>")
+            return
+        if not self.pipeline:
+            print("  ⚠️ FlowPipeline 未初始化")
+            return
+
+        impl_model = self.provider_config.model
+        review_model = self.review_llm.model if hasattr(self.review_llm, 'model') else impl_model
+
+        print(f"\n{'─'*50}")
+        print(f"  📋 /flow_plan — 计划优先模式")
+        print(f"  🛠 规划: {impl_model}  |  🔍 审查: {review_model}")
+        print(f"  📝 任务: {task[:100]}")
+        print(f"{'─'*50}")
+
+        async def plan_gate_handler(phase: str, info: dict) -> str:
+            if phase == "plan_compare":
+                print(f"\n  {'─'*48}")
+                print(f"  计划已生成，等待审查...")
+                print(f"\n  📄 原始计划 (A):")
+                print(f"  {'─'*40}")
+                original = info.get("original_plan", "")
+                print(f"  {original[:500]}{'...' if len(original) > 500 else ''}")
+                print(f"\n  📄 审查后计划 (B):")
+                print(f"  {'─'*40}")
+                reviewed = info.get("reviewed_plan", "")
+                print(f"  {reviewed[:500]}{'...' if len(reviewed) > 500 else ''}")
+                print(f"\n  请选择:")
+                print(f"    (A) 执行原始计划")
+                print(f"    (B) 执行审查后计划")
+                print(f"    (C) 取消")
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input("  请选择 [A/B/C]: ").strip().lower()
+                )
+                if resp == "a":
+                    return "original"
+                elif resp == "b":
+                    return "reviewed"
+                else:
+                    return "cancelled"
+            return "reviewed"
+
+        self.pipeline.gate_callback = plan_gate_handler
+
+        report = await self.pipeline.run_plan_first(task)
+
+        print(f"\n{'─'*50}")
+        print(f"  /flow_plan Report")
+        print(f"{'─'*50}")
+        print(f"  选择: {report.choice}")
+        print(f"  状态: {'✅ 成功' if report.success else '❌ 失败'}")
+        if report.verification_errors:
+            print(f"  ⚠️ 验证问题: {len(report.verification_errors)} 个")
+            for err in report.verification_errors[:5]:
+                print(f"    {err[:120]}")
+        print(f"  {report.summary}")
         print()
 
     async def _resume_session(self, args: str) -> None:

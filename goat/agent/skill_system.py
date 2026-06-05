@@ -24,14 +24,39 @@ class Skill:
     SKILL_DIR_REQUIRED_FILES: set[str] = field(default_factory=lambda: {"SKILL.md"})
 
     def to_prompt(self) -> str:
-        parts = [self.system_prompt_template]
+        parts = ["=" * 40,
+                 f"技能: {self.name}",
+                 self.description,
+                 "=" * 40,
+                 self.system_prompt_template]
+
+        # Agent 文件
         if self.agents:
-            agent_names = ", ".join(self.agents.keys())
-            parts.append(f"\n可用 Agent 角色: {agent_names}")
+            parts.append("\n可用 Agent 文件（可通过 read_file 读取）:")
+            for name, content in self.agents.items():
+                summary = content.strip().split('\n')[0][:80] if content else ""
+                rel_path = f"agents/{name}.md"
+                parts.append(f"  - {rel_path}  # {summary}")
+
+        # 参考文档
         if self.references:
-            ref_names = ", ".join(self.references.keys())
-            parts.append(f"\n参考文档: {ref_names}")
+            parts.append("\n可用参考文档（可通过 read_file 读取）:")
+            for name, content in self.references.items():
+                summary = content.strip().split('\n')[0][:80] if content else ""
+                parts.append(f"  - references/{name}.md  # {summary}")
+
+        # 脚本
+        if self.scripts and self.path:
+            parts.append("\n可用脚本（可通过 execute_command 运行）:")
+            for script in self.scripts:
+                rel = script.relative_to(self.path)
+                parts.append(f"  - {rel}")
+
+        parts.append("=" * 40)
         return "\n".join(parts)
+
+    def has_valid_content(self) -> bool:
+        return bool(self.name and (self.description or self.system_prompt_template))
 
     def get_tools(self) -> list[BaseTool]:
         return self.tools
@@ -213,11 +238,5 @@ class SkillRegistry:
         skills = self.list_all()
         if not skills:
             return ""
-        lines = ["可用技能:"]
-        for s in skills:
-            detail = s.description
-            if s.metadata.get("has_agents"):
-                agent_list = ", ".join(s.agents.keys())
-                detail += f" (子角色: {agent_list})"
-            lines.append(f"  - {s.name}: {detail}")
-        return "\n".join(lines)
+        blocks = [s.to_prompt() for s in skills]
+        return "\n\n".join(blocks)

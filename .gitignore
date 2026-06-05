@@ -84,6 +84,10 @@ env/
 # Deprecated
 tui_legacy/
 
+# Deprecated TUI startup scripts
+start_tui.bat
+start_tui_new_terminal.bat
+
 # OS
 .DS_Store
 Thumbs.db

@@ -23,6 +23,8 @@ export default function FileTree({ tree, onFileSelect }: FileTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [menu, setMenu] = useState<ContextMenu | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const [lazyChildren, setLazyChildren] = useState<Record<string, FileNode[]>>({})
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!menu) return
@@ -45,6 +47,33 @@ export default function FileTree({ tree, onFileSelect }: FileTreeProps) {
     })
   }, [])
 
+  const loadChildren = useCallback(async (path: string) => {
+    setLoadingPaths(prev => new Set(prev).add(path))
+    try {
+      const res = await fetch(`/api/files/children?path=${encodeURIComponent(path)}`)
+      const data = await res.json()
+      setLazyChildren(prev => ({ ...prev, [path]: data.children || [] }))
+    } catch {
+      // 静默失败
+    } finally {
+      setLoadingPaths(prev => { const next = new Set(prev); next.delete(path); return next })
+    }
+  }, [])
+
+  const handleNodeClick = useCallback((node: FileNode) => {
+    if (node.type === 'directory') {
+      const isCurrentlyExpanded = expanded.has(node.path)
+      if (!isCurrentlyExpanded) {
+        if ((!node.children || node.children.length === 0) && !lazyChildren[node.path] && !loadingPaths.has(node.path)) {
+          loadChildren(node.path)
+        }
+      }
+      toggleExpand(node.path)
+    } else {
+      onFileSelect?.(node.path)
+    }
+  }, [expanded, lazyChildren, loadingPaths, toggleExpand, loadChildren, onFileSelect])
+
   const handleContextMenu = useCallback((e: React.MouseEvent, node: FileNode) => {
     e.preventDefault()
     e.stopPropagation()
@@ -58,13 +87,7 @@ export default function FileTree({ tree, onFileSelect }: FileTreeProps) {
     return (
       <div key={node.path}>
         <div
-          onClick={() => {
-            if (node.type === 'directory') {
-              toggleExpand(node.path)
-            } else {
-              onFileSelect?.(node.path)
-            }
-          }}
+          onClick={() => handleNodeClick(node)}
           onContextMenu={(e) => handleContextMenu(e, node)}
           className="flex items-center gap-1 px-2 py-1 cursor-pointer text-xs text-text-dim hover:text-text hover:bg-surface-light transition-colors rounded-none"
           style={{ paddingLeft: `${paddingLeft}px` }}
@@ -83,9 +106,15 @@ export default function FileTree({ tree, onFileSelect }: FileTreeProps) {
           )}
           <span className="truncate">{node.name}</span>
         </div>
-        {node.type === 'directory' && isExpanded && node.children && (
+        {node.type === 'directory' && isExpanded && (
           <div>
-            {node.children.map((child) => renderNode(child, depth + 1))}
+            {loadingPaths.has(node.path) ? (
+              <div style={{ paddingLeft: `${paddingLeft + 16}px` }} className="text-xs text-text-darker px-2 py-1">
+                加载中...
+              </div>
+            ) : (
+              (lazyChildren[node.path] ?? node.children)?.map((child) => renderNode(child, depth + 1))
+            )}
           </div>
         )}
       </div>

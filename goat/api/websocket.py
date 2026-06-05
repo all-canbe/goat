@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 from typing import Any
 
 from fastapi import WebSocket
@@ -74,6 +75,8 @@ class WSManager:
             await self._handle_ask_user_answer(payload)
         elif msg_type == "skills.install":
             await self._handle_skills_install(payload)
+        elif msg_type == "flow.plan_choice":
+            await self._handle_flow_plan_choice(payload)
         else:
             logger.warning("Unknown message type: %s", msg_type)
 
@@ -145,7 +148,7 @@ class WSManager:
             if not url:
                 continue
             try:
-                cmd = f"npx skills add {url}"
+                cmd = f"npx skills add {shlex.quote(url)}"
                 if scope == "global":
                     cmd += " --global"
                 proc = await asyncio.create_subprocess_shell(
@@ -171,6 +174,13 @@ class WSManager:
             "type": "skills.install.result",
             "payload": {"results": results}
         })
+
+    async def _handle_flow_plan_choice(self, payload: dict) -> None:
+        choice = payload.get("choice", "cancelled")
+        session_id = payload.get("sessionId", "default")
+        logger.info("Flow plan choice: %s for session %s", choice, session_id[:8])
+        if self._session_manager and hasattr(self._session_manager, 'submit_flow_plan_choice'):
+            self._session_manager.submit_flow_plan_choice(choice)
 
 
 ws_manager = WSManager()

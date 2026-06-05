@@ -50,6 +50,7 @@ export default function StatusBar() {
   const messageCount = useConnectionStore((s) => s.messageCount)
   const activeState = useChatStore((s) => s.getActiveState())
   const isStreaming = activeState?.isStreaming ?? false
+  const streamError = activeState?.streamError ?? null
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [isLight, setIsLight] = useState(getInitialTheme)
 
@@ -83,19 +84,23 @@ export default function StatusBar() {
 
   const statusText = notificationText
     ? notificationText
-    : hasPendingApproval
-      ? '\u23F3 \u7B49\u5F85\u5BA1\u6279'
-      : isToolRunning
-        ? `\u25B6 \u5DE5\u5177\u8FD0\u884C\u4E2D: ${toolCommand.length > 40 ? toolCommand.slice(0, 40) + '...' : toolCommand}`
-        : isThinking
-          ? '\u27D0 \u601D\u8003\u4E2D...'
-          : isStreaming
-            ? '\u25B6 \u6D41\u5F0F\u8F93\u51FA\u4E2D'
-            : '\u23F8 \u7A7A\u95F2'
+    : streamError
+      ? '\u274C 出错了'
+      : hasPendingApproval
+        ? '\u23F3 \u7B49\u5F85\u5BA1\u6279'
+        : isToolRunning
+          ? `\u25B6 \u5DE5\u5177\u8FD0\u884C\u4E2D: ${toolCommand.length > 40 ? toolCommand.slice(0, 40) + '...' : toolCommand}`
+          : isThinking
+            ? '\u27D0 \u601D\u8003\u4E2D...'
+            : isStreaming
+              ? '\u25B6 \u6D41\u5F0F\u8F93\u51FA\u4E2D'
+              : '\u23F8 \u7A7A\u95F2'
 
   const statusTextColor = notificationText
     ? 'text-warning'
-    : hasPendingApproval
+    : streamError
+      ? 'text-error'
+      : hasPendingApproval
       ? 'text-error'
       : isToolRunning
         ? 'text-success'

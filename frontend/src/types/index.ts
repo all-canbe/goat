@@ -4,10 +4,16 @@ export interface WSMessage {
   timestamp?: number
 }
 
+export interface FileAttachment {
+  path: string
+  name: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool' | 'error'
   content: string
+  attachments?: FileAttachment[]
   toolCalls?: ToolCall[]
   timestamp: number
 }
@@ -42,4 +48,10 @@ export interface PendingApproval {
 export interface PendingQuestion {
   questionId: string
   question: string
+}
+
+export interface PendingPlanCompare {
+  task: string
+  originalPlan: string
+  reviewedPlan: string
 }

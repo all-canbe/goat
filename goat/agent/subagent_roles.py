@@ -49,7 +49,7 @@ ROLE_REGISTRY: dict[RoleType, RoleDefinition] = {
     RoleType.PLAN: RoleDefinition(
         role_type=RoleType.PLAN,
         display_name="任务规划",
-        allowed_tools=["list_files", "read_file", "write_file"],
+        allowed_tools=["list_files", "read_file", "save_plan_doc", "search_code"],
         can_spawn=False,
     ),
     RoleType.IMPLEMENTER: RoleDefinition(

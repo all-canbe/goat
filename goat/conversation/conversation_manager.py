@@ -133,8 +133,10 @@ class ConversationManager:
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
 
-    async def create_session(self, model: str = "", title: str = "新对话") -> str:
-        session_id = str(uuid.uuid4())
+    async def create_session(self, model: str = "", title: str = "新对话",
+                             session_id: str | None = None) -> str:
+        if session_id is None:
+            session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
         conn.execute(

@@ -34,3 +34,31 @@ def resolve_workspace(workspace_arg: str | None = None) -> Path:
             return path
         print(f"  ⚠️ 指定的工作空间不存在: {workspace_arg}，使用当前目录")
     return Path.cwd().resolve()
+
+
+def get_workspace_goat_dir(workspace: Path | None = None) -> Path:
+    """返回项目级 .goat 目录（等价于 Claude Code 的 .claude/）。
+
+    新建 `<project_root>/.goat/` 目录，用于存放：
+    - skills/        — 项目专属 skill，仅本项目生效
+    - rules/         — 项目规则（类似 CLAUDE.md）
+    - settings.json  — 项目专属设置（后续扩展）
+    """
+    root = workspace or Path.cwd().resolve()
+    goat_dir = root / ".goat"
+    goat_dir.mkdir(parents=True, exist_ok=True)
+    return goat_dir
+
+
+def ensure_workspace_goat_layout(workspace: Path | None = None) -> Path:
+    """确保打开的工作空间下 .goat/ 目录布局完整。
+
+    返回值：项目级 .goat 目录路径。
+    副作用：若 .goat 不存在则创建；始终确保 skills/ 和 GOAT.md 存在。
+    """
+    root = workspace or Path.cwd().resolve()
+    goat_dir = root / ".goat"
+    goat_dir.mkdir(parents=True, exist_ok=True)
+    (goat_dir / "skills").mkdir(parents=True, exist_ok=True)
+    (goat_dir / "GOAT.md").touch()  # 仅占位，不写内容
+    return goat_dir

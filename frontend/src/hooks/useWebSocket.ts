@@ -3,7 +3,7 @@ import { WSClient } from '@/lib/ws-client'
 import { useChatStore } from '@/stores/chatStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import type { PendingApproval, PermissionMode, ToolCall } from '@/types'
+import type { PendingApproval, PendingPlanCompare, PermissionMode, ToolCall } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 function getSessionId(msg: any): string {
@@ -47,21 +47,33 @@ export function useWebSocket() {
     })
 
     const unsubResponse = client.on('chat.response', (msg) => {
+      const content = msg.payload.content as string | undefined
       const messageId = msg.payload.messageId as string
       const sid = getSessionId(msg)
-      useChatStore.getState().commitStream(sid, messageId)
+      const store = useChatStore.getState()
+      const s = store.sessions[sid]
+      if (!s) return
+      if (s.streamingContent || (content && content.trim())) {
+        store.commitStream(sid, messageId, content)
+      } else {
+        // 空内容哨兵（来自 finally 的 LLM_RESPONSE("")）：仅解除 streaming，不创建假消息
+        store.clearStream(sid)
+      }
     })
 
     const unsubError = client.on('chat.error', (msg) => {
       const error = msg.payload.error as string
       const sid = getSessionId(msg)
-      useChatStore.getState().addMessage(sid, {
+      const store = useChatStore.getState()
+      // 将错误显示为对话消息（保证用户可见）
+      store.addMessage(sid, {
         id: crypto.randomUUID(),
-        role: 'system',
-        content: `Error: ${error}`,
+        role: 'error',
+        content: error,
         timestamp: Date.now(),
       })
-      useChatStore.getState().clearStream(sid)
+      // 清除流式状态，解除输入锁定
+      store.clearStream(sid)
     })
 
     const unsubApproval = client.on('tool.require_approval', (msg) => {
@@ -96,6 +108,17 @@ export function useWebSocket() {
         questionId: (msg.payload.questionId as string) || '',
         question: (msg.payload.question as string) || '',
       })
+    })
+
+    const unsubPlanCompare = client.on('flow.plan_compare', (msg) => {
+      const activeSid = useSessionStore.getState().activeSessionId
+      const sid = activeSid || getSessionId(msg)
+      const pending: PendingPlanCompare = {
+        task: (msg.payload.task as string) || '',
+        originalPlan: (msg.payload.original_plan as string) || '',
+        reviewedPlan: (msg.payload.reviewed_plan as string) || '',
+      }
+      useChatStore.getState().setPendingPlanCompare(sid, pending)
     })
 
     const unsubNotification = client.on('status.notification', (msg) => {
@@ -159,6 +182,10 @@ export function useWebSocket() {
       })
     })
 
+    const unsubSessionListUpdate = client.on('session.list.update', () => {
+      useSessionStore.getState().loadSessions()
+    })
+
     ;(window as any).__wsClient = client
     client.connect()
 
@@ -171,10 +198,12 @@ export function useWebSocket() {
       unsubApproval()
       unsubToolComplete()
       unsubAskUser()
+      unsubPlanCompare()
       unsubNotification()
       unsubSubagentLifecycle()
       unsubAuditLog()
       unsubToolRetry()
+      unsubSessionListUpdate()
       ;(window as any).__wsClient = null
       client.disconnect()
     }

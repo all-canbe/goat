@@ -44,6 +44,15 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
   }
 
   const commands: Command[] = useMemo(() => [
+    { id: 'flow.plan_first', label: 'Flow: Plan First (计划优先)', category: '模式切换', action: () => {
+      const ws = getWs()
+      ws?.send('mode.change', { mode: 'flow' })
+      setMode('flow')
+      setTimeout(() => {
+        ;(window as any).__setInputText?.('/flow_plan ')
+        ;(window as any).__focusInput?.()
+      }, 0)
+    }},
     { id: 'mode.plan', label: 'Mode: Plan (安全模式)', category: '模式切换', action: () => {
       const ws = getWs()
       ws?.send('mode.change', { mode: 'plan' })
@@ -240,6 +249,24 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
     }},
   ], [setMode, onOpenFile, onNewFile, onEditFile])
 
+  // 动态从已加载技能列表生成 `/技能名` 触发命令
+  const loadedSkills = useSkillStore((s) => s.skills)
+  const skillCommands: Command[] = useMemo(() => {
+    return loadedSkills.map((s) => ({
+      id: `skill.${s.name}`,
+      label: `/${s.name} — ${s.description ? s.description.slice(0, 40) : '应用该技能'}`,
+      category: '技能触发',
+      action: () => {
+        setTimeout(() => {
+          ;(window as any).__addSkillToInput?.(s.name)
+        }, 0)
+      },
+    }))
+  }, [loadedSkills])
+
+  // 合并静态命令 + 动态技能命令
+  const allCommands = useMemo(() => [...commands, ...skillCommands], [commands, skillCommands])
+
   useEffect(() => {
     const win = window as any
     win.__commandPaletteOpen = (q: string) => {
@@ -278,9 +305,9 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
   const filtered = useMemo(() => {
     const q = query.toLowerCase()
     return q
-      ? commands.filter((c) => c.label.toLowerCase().includes(q) || c.category.toLowerCase().includes(q))
-      : commands
-  }, [query, commands])
+      ? allCommands.filter((c) => c.label.toLowerCase().includes(q) || c.category.toLowerCase().includes(q))
+      : allCommands
+  }, [query, allCommands])
 
   useEffect(() => {
     if (!listRef.current || filtered.length === 0) return
@@ -328,6 +355,23 @@ export default function CommandPalette({ onOpenFile, onNewFile, onEditFile }: Co
                 e.preventDefault()
                 if (filtered[selectedIndex]) {
                   execute(filtered[selectedIndex])
+                } else {
+                  // fallback: `/技能名 [query]` 触发
+                  const m = query.match(/^\/([a-z][a-z0-9_-]+)\s*([\s\S]*)$/i)
+                  if (m) {
+                    const skillName = m[1].toLowerCase()
+                    const hit = useSkillStore.getState().skills.find(
+                      (s) => s.name.toLowerCase() === skillName
+                    )
+                    if (hit) {
+                      setTimeout(() => {
+                        ;(window as any).__addSkillToInput?.(hit.name)
+                      }, 0)
+                      setIsOpen(false)
+                      setQuery('')
+                      ;(window as any).__clearInput?.()
+                    }
+                  }
                 }
               } else if (e.key === 'Escape') {
                 setIsOpen(false)

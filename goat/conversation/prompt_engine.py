@@ -17,13 +17,25 @@ def _load_project_rules() -> str:
     if _PROJECT_RULES_CACHE is not None:
         return _PROJECT_RULES_CACHE
     parts: list[str] = []
-    goat = Path("GOAT.md")
-    if goat.exists():
-        parts.append(goat.read_text(encoding="utf-8"))
+
+    # 1. 个人规则: .goat/GOAT.md（个人编码习惯、偏好）
+    goat_personal = Path(".goat/GOAT.md")
+    if goat_personal.exists():
+        text = goat_personal.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(f"## 个人规则\n{text}")
+
+    # 2. 项目规则: .goat/rules/*.md（团队共享的项目约定）
     rules_dir = Path(".goat/rules")
     if rules_dir.exists():
         for f in sorted(rules_dir.glob("*.md")):
-            parts.append(f.read_text(encoding="utf-8"))
+            text = f.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(f"## 项目规则 — {f.stem}\n{text}")
+
+    # 确保 .goat/doc/ 目录存在（Plan 模式的 save_plan_doc 工具需要）
+    Path(".goat/doc").mkdir(parents=True, exist_ok=True)
+    Path(".goat/skills").mkdir(parents=True, exist_ok=True)
     _PROJECT_RULES_CACHE = "\n\n---\n\n".join(parts) if parts else ""
     return _PROJECT_RULES_CACHE
 
@@ -84,7 +96,7 @@ class PromptEngine:
         return rendered
 
     def render_main_system(self, role: str = "general",
-                           skills: list[str] | None = None,
+                           skills_block: str | None = None,
                            project_rules: str | None = None,
                            mode: str = "agent",
                            mode_description: str = "",
@@ -99,10 +111,21 @@ class PromptEngine:
         if mode_block.strip():
             rendered += "\n" + mode_block
 
+        # 在非 Plan 模式下注入 .goat/doc/ 的已有文档列表
+        if mode != "plan":
+            doc_files = list(Path(".goat/doc").glob("*.md"))
+            if doc_files:
+                doc_list = "\n".join(f"    {f.name}" for f in sorted(doc_files))
+                rendered += (
+                    "\n\n## 已有计划文档\n"
+                    "以下文档来自之前的 Plan 模式产出（.goat/doc/）：\n"
+                    f"{doc_list}\n"
+                    "如果当前任务涉及上述议题，优先读取对应文件。\n"
+                )
+
         skills_header = self._templates.get("skills_header", "")
-        if skills and skills_header:
-            skills_text = "\n".join(f"  - {s}" for s in skills)
-            rendered += self._render(skills_header, {"skills": skills_text})
+        if skills_block and skills_header:
+            rendered += self._render(skills_header, {"skills": skills_block})
 
         memory_block = self._build_memory_block()
         if memory_block:

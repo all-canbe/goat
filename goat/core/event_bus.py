@@ -22,6 +22,7 @@ class EventType(Enum):
     SUBAGENT_LIFECYCLE = "subagent_lifecycle"
     AUDIT_LOG = "audit_log"
     ASK_USER = "ask_user"
+    TRUNCATION = "truncation"
 
 
 @dataclass

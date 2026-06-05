@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Search } from 'lucide-react'
 import { useSkillStore } from '@/stores/skillStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useChatStore } from '@/stores/chatStore'
 
 export default function SkillInstallDialog() {
   const { phase, cancelFlow } = useSkillStore()
@@ -22,7 +23,18 @@ export default function SkillInstallDialog() {
     const q = query.trim()
     if (!q) return
 
-    const prompt = `请使用 find-skills 工具搜索与「${q}」相关的可用 AI 辅助编程 skill（技能/工具插件）。\n请列出每个 skill 的：名称、描述、安装 URL。`
+    // 工具名用 snake_case 以匹配 BUILTIN_TOOLS 注册名 (find_skills)
+    const prompt = `请使用 find_skills 工具搜索与「${q}」相关的可用 AI 辅助编程 skill（技能/工具插件），并列出每个 skill 的：名称、描述、安装命令。`
+
+    const sessionId = activeSessionId || 'default'
+    const store = useChatStore.getState()
+    store.addMessage(sessionId, {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: prompt,
+      timestamp: Date.now(),
+    })
+    store.appendStreamToken(sessionId, '')
 
     const ws = (window as any).__wsClient as import('@/lib/ws-client').WSClient | null
     if (ws && activeSessionId) {

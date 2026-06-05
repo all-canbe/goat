@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-Goat TUI 入口 - 山羊主题的终端 AI 编程助手
+[DEPRECATED] TUI 入口 — 不再维护。
 
-用法:
-    # 运行 TUI
-    goat_tui
-    # 或    python tui_main.py [--provider openai_compatible] [--model gpt-4o]
+TUI 方式已废弃，请使用以下方式启动 Goat：
 
-环境变量:
-    API_KEY, BASE_URL, MODEL
+    CLI:     python main.py
+    Web:     python main.py web
+
+本文件保留仅作参考，入口函数 main() 和 goat_tui 仍可用但不再更新。
 """
+
+# # ── 原始文档（保留供参考）──
+# """
+# Goat TUI 入口 - 山羊主题的终端 AI 编程助手
+#
+# 用法:
+#     # 运行 TUI
+#     goat_tui
+#     # 或    python tui_main.py [--provider openai_compatible] [--model gpt-4o]
+#
+# 环境变量:
+#     API_KEY, BASE_URL, MODEL
+# """
 
 from __future__ import annotations
 
@@ -45,6 +57,7 @@ from goat.conversation.prompt_engine import engine as prompt_engine
 from goat.agent.subagent_manager import SubAgentManager
 from goat.agent.subagent_runtime import (
     MAX_AGENT_TURNS, AgentContext, _build_subagent_tools,
+    looks_like_final_answer, continuation_prompt,
 )
 from goat.agent.model_router import ModelRouter, ModelRouterConfig, DEFAULT_SUB_MODEL
 from goat.agent.skill_system import SkillRegistry, Skill
@@ -83,6 +96,7 @@ async def run_tui(workspace: str | None = None):
     sub_model = settings.get("sub_model") or provider_config.model if settings else provider_config.model
     review_model = settings.get("review_model", "") if settings else ""
     review_provider = None
+    review_llm = llm  # default: same as main model
     if settings and settings.get("review_api_key"):
         try:
             review_provider = ProviderConfig(
@@ -93,6 +107,15 @@ async def run_tui(workspace: str | None = None):
             )
         except Exception:
             review_provider = None
+    if review_provider:
+        review_llm = create_llm(review_provider)
+    elif review_model and settings:
+        review_llm = create_llm(ProviderConfig(
+            provider_type=provider_config.provider_type,
+            base_url=provider_config.base_url,
+            api_key=provider_config.api_key,
+            model=review_model,
+        ))
     router_config = ModelRouterConfig(
         main_model=provider_config.model,
         sub_model=sub_model,
@@ -145,7 +168,7 @@ async def run_tui(workspace: str | None = None):
 
     pipeline = FlowPipeline(
         impl_llm=llm,
-        review_llm=llm,
+        review_llm=review_llm,
         manager=manager,
         skill_registry=skill_registry,
         event_bus=event_bus,
@@ -256,6 +279,7 @@ async def _process_input_loop(
                 )
                 try:
                     if state.mode == PermissionMode.FLOW and is_complex_task(text):
+                        await _check_tui_review_model(event_bus, review_llm, llm, settings)
                         await _do_flow_chat(
                             message=text,
                             pipeline=pipeline,
@@ -338,6 +362,7 @@ async def _process_input_loop(
 
         try:
             if state.mode == PermissionMode.FLOW and is_complex_task(text):
+                await _check_tui_review_model(event_bus, review_llm, llm, settings)
                 await _do_flow_chat(
                     message=text,
                     pipeline=pipeline,
@@ -615,6 +640,7 @@ async def _handle_cli_command(
                            sub_model=model_router.router_config.sub_model,
                            review_model=new_review,
                            review_config=None)
+            _set_setting_flag("review_model_prompted", True)
             event_bus.publish_nowait("system", EventType.MESSAGE, f"?审查模型已切换为: {new_review}")
 
         elif sub_cmd == "add" and len(parts) >= 4:
@@ -976,6 +1002,22 @@ async def _handle_cli_command(
     return None
 
 
+async def _check_tui_review_model(
+    event_bus: EventBus,
+    review_llm: ChatOpenAI,
+    llm: ChatOpenAI,
+    settings: dict | None,
+) -> None:
+    """TUI 侧检查审查模型是否独立，未独立且在首次时推送通知消息。"""
+    if settings and settings.get("review_model_prompted"):
+        return
+    if review_llm is not llm:
+        return
+    event_bus.publish_nowait("system", EventType.NOTIFICATION,
+                             "💡 Flow 模式建议使用独立审查模型以获得更客观的审查效果。可通过 /model review <模型名> 命令配置。",
+                             agent_name="system")
+
+
 async def _do_flow_chat(
     message: str,
     pipeline: FlowPipeline,
@@ -1077,6 +1119,8 @@ async def _do_chat(
         "llm", EventType.LLM_STREAM, "", agent_name="assistant",
     )
 
+    continuation_count = 0
+
     for turn in range(MAX_AGENT_TURNS):
         if cancel_token.is_cancelled():
             event_bus.publish_nowait(
@@ -1133,7 +1177,40 @@ async def _do_chat(
         token_tracker.record_turn(input_text, output_text)
 
         if not response.tool_calls:
-            content = str(response.content) if response.content else "(无内?"
+            raw_content = str(response.content) if response.content else ""
+
+            # ── 检测中途状态更新（非最终答案），自动催促 LLM 继续 ──
+            if not looks_like_final_answer(raw_content):
+                continuation_count += 1
+                if continuation_count <= 3:
+                    await conversations.add_message(response)
+                    await conversations.add_message(HumanMessage(
+                        content=continuation_prompt(continuation_count)
+                    ))
+                    event_bus.publish_nowait(
+                        "system", EventType.MESSAGE,
+                        f"任务未完成，自动继续（{continuation_count}/3）...",
+                        agent_name="system",
+                    )
+                    continue
+                else:
+                    event_bus.publish_nowait(
+                        "system", EventType.MESSAGE,
+                        "连续3次无工具调用，退出等待用户指令",
+                        agent_name="system",
+                    )
+                    await conversations.add_message(response)
+                    content = raw_content if raw_content else "(无内容)"
+                    event_bus.publish_nowait(
+                        "llm", EventType.LLM_RESPONSE, content, agent_name="assistant",
+                    )
+                    event_bus.publish_nowait(
+                        "system", EventType.COMPLETED, "completed", agent_name="system",
+                    )
+                    return
+
+            continuation_count = 0
+            content = raw_content if raw_content else "(无内容)"
             event_bus.publish_nowait(
                 "llm", EventType.LLM_RESPONSE,
                 content,
@@ -1151,6 +1228,8 @@ async def _do_chat(
             return
 
         await conversations.add_message(response)
+
+        continuation_count = 0  # 有工具调用，重置计数
 
         tool_name_map = {t.name: t for t in all_tools}
         for tc in response.tool_calls:

@@ -102,6 +102,62 @@ class AgentContext:
 
 MAX_AGENT_TURNS = 200
 
+# ── 检测 LLM 回复是否为最终答案（而非中途状态更新） ──
+_CONTINUATION_MARKERS = frozenset({
+    "继续", "接下来", "正在", "开始", "首先", "让我", "先",
+    "然后", "接着", "下一步",
+})
+_COMPLETION_MARKERS = frozenset({
+    "完成", "总结", "以上", "综上", "done", "finished", "complete",
+    "任务完成", "已完成", "## 任务完成",
+})
+
+
+def looks_like_final_answer(content: str) -> bool:
+    """检测回复内容是否为最终答案（任务完成），而非中途状态更新。"""
+    if not content or not content.strip():
+        return False  # 空内容 → 非最终答案
+
+    stripped = content.strip()
+
+    # 检查显式完成标记（优先于长度/延续词检查）
+    if any(m in stripped for m in _COMPLETION_MARKERS):
+        return True
+
+    # 极短内容（< 8 字符）无完成标记 → 非最终答案（如"好的"、"继续"）
+    if len(stripped) < 8:
+        return False
+
+    # 以 "：" / ":" / "…" / "..." 结尾 → 暗示后续还有内容
+    if stripped.rstrip().endswith(("：", ":", "…", "...")):
+        return False
+
+    # 包含延续词且不包含完成词 → 中途状态
+    has_continuation = any(m in stripped for m in _CONTINUATION_MARKERS)
+    if has_continuation:
+        return False
+
+    return True
+
+
+def continuation_prompt(count: int) -> str:
+    """根据连续无工具调用次数生成递进式催促提示。"""
+    if count <= 1:
+        return (
+            "你刚才输出了文字但没有调用任何工具。请立即调用工具来执行下一步操作，"
+            "不要仅输出文本描述。如果需要读取文件就用 read_file，需要写文件就用 write_file。"
+        )
+    elif count == 2:
+        return (
+            "你又输出了文字但没有调用任何工具。请立刻调用工具完成任务，不要继续输出计划或说明。"
+            "你有工具可用，请直接使用它们。"
+        )
+    else:
+        return (
+            "你已经连续三次只输出文字不调用工具了。最后一次警告：立即调用合适的工具执行操作，"
+            "否则将退出等待用户指令。不要输出任何说明文字，只调用工具。"
+        )
+
 
 async def run_subagent(ctx: AgentContext) -> str:
     return await _run_agent_loop(ctx)
@@ -171,6 +227,19 @@ async def _run_agent_loop(ctx: AgentContext) -> str:
 
             tool_calls = getattr(response, "tool_calls", [])
             if not tool_calls:
+                # === 截断检测 ===
+                finish_reason = ""
+                if hasattr(response, "response_metadata") and isinstance(response.response_metadata, dict):
+                    finish_reason = response.response_metadata.get("finish_reason", "") or ""
+                if finish_reason in ("length", "max_tokens") and response.content:
+                    ctx.event_bus and await ctx.event_bus.publish(
+                        SubagentEvent(EventType.TRUNCATION, ctx.agent_id, ctx.agent_name,
+                                      finish_reason, depth))
+                    messages.append(ToolMessage(
+                        content=f"你的上一条响应被截断了 (finish_reason={finish_reason})，请直接输出未完成的 tool_calls。",
+                        tool_call_id="truncation_retry",
+                    ))
+                    continue
                 break
 
             if turn >= MAX_AGENT_TURNS - 1:
