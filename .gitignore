@@ -27,6 +27,12 @@ skills-lock.json
 
 # Temporary helper scripts and generated files
 _[a-z]*
+show*.txt
+chat_handler_history.txt
+*_chat_handler.txt
+
+# Trae IDE local data (per-user, not project artifact)
+trae/
 
 # Web runtime databases
 .goat_web/
