@@ -68,13 +68,31 @@ class PromptEngine:
         if role_info is None:
             return ""
 
-        template = role_info.get("system", "")
-
         base_vars = self._build_base_vars()
         base_vars.update(kwargs)
 
-        rendered = self._render(template, base_vars)
+        # ── 三层共享前缀 ──
+        parts: list[str] = []
 
+        safety = self._templates.get("safety_preamble", "")
+        if safety:
+            parts.append(safety)
+
+        rules = self._templates.get("system_rules", "")
+        if rules:
+            parts.append(rules)
+
+        behavior = self._templates.get("shared_behavior", "")
+        if behavior:
+            parts.append(behavior)
+
+        # ── 角色专项 ──
+        template = role_info.get("system", "")
+        parts.append(self._render(template, base_vars))
+
+        rendered = "\n\n".join(parts)
+
+        # ── agent_suffix ──
         suffix_template = self._templates.get("agent_suffix", "")
         if suffix_template:
             suffix = self._render(suffix_template, base_vars)
