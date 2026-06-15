@@ -193,6 +193,9 @@ class SessionManager:
         self._initialized = True
         logger.info("SessionManager 初始化完成 %s", get_provider_display(self.provider_config))
 
+        from goat.tools.tools import set_plan_workspace
+        set_plan_workspace(self.workspace)
+
         from goat.tools.ask_user_tool import set_external_queue
         set_external_queue(asyncio.Queue())
 
@@ -203,6 +206,8 @@ class SessionManager:
         if not p.is_dir():
             return False, f"路径不是目录: {path}"
         self.workspace = p
+        from goat.tools.tools import set_plan_workspace
+        set_plan_workspace(self.workspace)
         ensure_workspace_goat_layout(p)
         _save_settings({"workspace": str(p)})
         for engine in self._engines.values():

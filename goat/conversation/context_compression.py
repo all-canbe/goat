@@ -75,6 +75,10 @@ class CompactionConfig:
     def effective_threshold(self) -> int:
         return int(self.context_window * self.compaction_threshold_ratio)
 
+    def compression_needed(self, estimated_tokens: int) -> bool:
+        """检查是否达到压缩阈值（80% 窗口）"""
+        return estimated_tokens >= self.effective_threshold()
+
 
 @dataclass
 class CompressionToolResult:
@@ -219,20 +223,30 @@ class CompactionPipeline:
         self.config = config or CompactionConfig()
 
     async def should_compact(self, ctx: CompressionContext) -> tuple[bool, CompactionTrigger, CompactionPhase]:
+        """判断是否需要压缩。以 80% 上下文窗口为主要触发条件。
+
+        优先级：
+        1. 工具调用过多 → MICRO 压缩
+        2. Token 达到 80% 窗口 → 选择压缩级别
+        3. 摘要链过长 → SESSION_MEMORY 压缩
+        """
         est = ctx.estimate_tokens()
         effective_threshold = self.config.effective_threshold()
 
+        # 1. 工具调用过多触发微压缩（在达到 80% 窗口之前预防性清理）
         tool_count = est.tool_calls
         if tool_count >= self.config.micro_compact_tool_count and est.total >= self.config.micro_compact_min_tokens:
             return True, CompactionTrigger.AUTO_THRESHOLD, CompactionPhase.MICRO
 
+        # 2. 80% 窗口策略：Token 达到阈值时触发压缩
         if est.total >= effective_threshold:
             if est.total >= self.config.collapse_min_tokens:
                 return True, CompactionTrigger.AUTO_THRESHOLD, CompactionPhase.CONTEXT_COLLAPSE
             return True, CompactionTrigger.AUTO_THRESHOLD, CompactionPhase.MICRO
 
+        # 3. 摘要链过长触发合并
         if ctx.summary_chain.token_count() >= self.config.session_memory_min_tokens:
-            return True, CompactionTrigger.TIME_BASED, CompactionPhase.SESSION_MEMORY
+            return True, CompactionTrigger.AUTO_HEADROOM, CompactionPhase.SESSION_MEMORY
 
         return False, CompactionTrigger.MANUAL, CompactionPhase.FULL
 
@@ -256,7 +270,7 @@ class CompactionPipeline:
         recent = messages[-keep_recent:]
 
         summary_text = f"[系统已压缩 {len(unrecent)} 条历史消息]"
-        summary_msg = CompressionMessage(role="system", content=summary_text)
+        summary_msg = CompressionMessage(role="user", content=summary_text)
 
         return [summary_msg] + recent
 
@@ -269,7 +283,7 @@ class CompactionPipeline:
         remaining = messages[collapse_count:]
 
         collapse_text = f"[系统已压缩 {len(to_collapse)} 条上下文消息]"
-        summary_msg = CompressionMessage(role="system", content=collapse_text)
+        summary_msg = CompressionMessage(role="user", content=collapse_text)
 
         return [summary_msg] + remaining
 
@@ -278,7 +292,7 @@ class CompactionPipeline:
 
     def _full_compact(self, messages: list[CompressionMessage]) -> list[CompressionMessage]:
         summary_text = f"[系统已压缩全部 {len(messages)} 条消息]"
-        return [CompressionMessage(role="system", content=summary_text) + messages[-1:]]
+        return [CompressionMessage(role="user", content=summary_text) + messages[-1:]]
 
 
 class ContextManager:

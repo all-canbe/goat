@@ -175,7 +175,7 @@ class ConversationManager:
         messages: list[BaseMessage] = []
 
         if self._compressed_summary_text:
-            messages.append(SystemMessage(content=self._compressed_summary_text))
+            messages.append(HumanMessage(content=self._compressed_summary_text))
 
         for row in rows:
             content = row["content"] or ""
@@ -192,7 +192,8 @@ class ConversationManager:
 
         return messages
 
-    async def add_message(self, message: BaseMessage, session_id: str | None = None) -> str:
+    async def add_message(self, message: BaseMessage, session_id: str | None = None,
+                          extra_metadata: dict | None = None) -> str:
         sid = session_id or self._current_session_id
         if sid is None:
             return ""
@@ -222,6 +223,10 @@ class ConversationManager:
             if message.tool_call_id:
                 metadata["tool_call_id"] = message.tool_call_id
 
+        # Merge external metadata (e.g., hint marker)
+        if extra_metadata:
+            metadata.update(extra_metadata)
+
         conn = self._get_conn()
 
         if role == "user":
@@ -244,9 +249,12 @@ class ConversationManager:
             "INSERT INTO messages (session_id, role, content, tool_call_id, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (sid, role, content, tool_call_id, metadata_json, now),
         )
+        extra_tokens = 0
+        if role in ("user", "assistant", "tool"):
+            extra_tokens = max(1, len(content) // 4)
         conn.execute(
-            "UPDATE sessions SET message_count = message_count + 1, updated_at = ? WHERE session_id = ?",
-            (now, sid),
+            "UPDATE sessions SET message_count = message_count + 1, token_count = token_count + ?, updated_at = ? WHERE session_id = ?",
+            (extra_tokens, now, sid),
         )
         conn.commit()
 

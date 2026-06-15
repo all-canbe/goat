@@ -9,6 +9,8 @@ import {
   ChevronDown,
   ChevronUp,
   Pencil,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react'
 import { useMcpStore, type McpServer } from '@/stores/mcpStore'
 
@@ -190,14 +192,40 @@ export default function McpConfigPage({ isOpen, onClose }: McpConfigPageProps) {
                   {server.name}
                 </button>
                 <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => handleTest(server)}
-                    disabled={testing === server.name}
-                    className="p-1 rounded hover:bg-surface-lighter text-text-dim hover:text-text transition-colors disabled:opacity-50"
-                    title="Test connection"
-                  >
-                    {testing === server.name ? <Loader2 size={14} className="animate-spin" /> : <Plug size={14} />}
-                  </button>
+                  {(() => {
+                    const result = testResult && testResult.name === server.name ? testResult : null
+                    const iconClass = result
+                      ? result.ok
+                        ? 'text-success'
+                        : 'text-error'
+                      : 'text-text-dim hover:text-text'
+                    return (
+                      <button
+                        onClick={() => handleTest(server)}
+                        disabled={testing === server.name}
+                        className={`p-1 rounded hover:bg-surface-lighter transition-colors disabled:opacity-50 ${iconClass}`}
+                        title={
+                          result
+                            ? result.ok
+                              ? 'Connected'
+                              : `Failed: ${result.msg}`
+                            : 'Test connection'
+                        }
+                      >
+                        {testing === server.name ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : result ? (
+                          result.ok ? (
+                            <CheckCircle2 size={14} />
+                          ) : (
+                            <XCircle size={14} />
+                          )
+                        ) : (
+                          <Plug size={14} />
+                        )}
+                      </button>
+                    )
+                  })()}
                   <button
                     onClick={() => startEdit(server)}
                     className="p-1 rounded hover:bg-surface-lighter text-text-dim hover:text-text transition-colors"

@@ -16,7 +16,7 @@ from ..core.cancellation import CancellationToken
 from .subagent_manager import SubAgentManager, SubAgent, SubAgentStatus
 from .subagent_roles import RoleType, RoleDefinition, get_role
 from .skill_system import SkillRegistry
-from ..tools.tools import get_tools_by_names
+from ..tools.tools import get_tools_by_names, describe_tool_action
 from ..core.event_bus import EventBus, EventType, SubagentEvent
 from ..conversation.prompt_engine import engine as prompt_engine
 from .structured_output import parse_structured_output
@@ -61,8 +61,16 @@ class ToolCallDeduper:
         return recent.count(fp) >= 3
 
 
-def _format_tool_action(name: str, args: dict) -> str:
-    return json.dumps({"tool_name": name, "args": args}, ensure_ascii=False)
+def _format_tool_action(tool_id: str, name: str, args: dict) -> str:
+    return json.dumps(
+        {
+            "id": tool_id,
+            "tool_name": name,
+            "args": args,
+            "description": describe_tool_action(name, args),
+        },
+        ensure_ascii=False,
+    )
 
 
 def _stream_command_output(ctx: AgentContext, result: str) -> None:
@@ -75,6 +83,19 @@ def _stream_command_output(ctx: AgentContext, result: str) -> None:
         ctx.event_bus.publish_nowait(
             ctx.agent_id, etype, line, ctx.agent_name, ctx.depth,
         )
+
+
+def _estimate_prefix_match(prev: str, curr: str) -> tuple[int, int]:
+    """返回 (匹配字符数, 总字符数)。"""
+    if not prev or not curr:
+        return 0, len(curr)
+    matched = 0
+    for a, b in zip(prev, curr):
+        if a == b:
+            matched += 1
+        else:
+            break
+    return matched, len(curr)
 
 
 @dataclass
@@ -114,27 +135,31 @@ _COMPLETION_MARKERS = frozenset({
 
 
 def looks_like_final_answer(content: str) -> bool:
-    """检测回复内容是否为最终答案（任务完成），而非中途状态更新。"""
+    """检测回复内容是否为最终答案（任务完成），而非中途状态更新。
+
+    检查顺序：先查延续标记，再查完成标记。
+    这样 "Phase 1 完成。继续 Phase 2" 会被延续词 "继续" 拦截，
+    而不会被 "完成" 误判为任务结束。
+    """
     if not content or not content.strip():
         return False  # 空内容 → 非最终答案
 
     stripped = content.strip()
 
-    # 检查显式完成标记（优先于长度/延续词检查）
-    if any(m in stripped for m in _COMPLETION_MARKERS):
-        return True
-
-    # 极短内容（< 8 字符）无完成标记 → 非最终答案（如"好的"、"继续"）
-    if len(stripped) < 8:
-        return False
-
     # 以 "：" / ":" / "…" / "..." 结尾 → 暗示后续还有内容
     if stripped.rstrip().endswith(("：", ":", "…", "...")):
         return False
 
-    # 包含延续词且不包含完成词 → 中途状态
-    has_continuation = any(m in stripped for m in _CONTINUATION_MARKERS)
-    if has_continuation:
+    # ★ 先检查延续标记 — 有延续意图则不是最终答案（即使同时含完成词）
+    if any(m in stripped for m in _CONTINUATION_MARKERS):
+        return False
+
+    # ★ 再检查完成标记 — 只有在无延续意图时才判定为完成
+    if any(m in stripped for m in _COMPLETION_MARKERS):
+        return True
+
+    # 极短内容（< 4 字符）无任何标记 → 非最终答案（如"好的"）
+    if len(stripped) < 4:
         return False
 
     return True
@@ -168,17 +193,16 @@ async def _run_agent_loop(ctx: AgentContext) -> str:
     role_name = role_type.value
     depth = ctx.depth
 
+    # 构建稳定的 System Prompt（角色定义 + 排序后的技能列表）
+    # 保持前缀稳定以最大化 LLM 提供商的 prefix cache 命中率
     system_text = ctx.role_def.system_prompt
     if ctx.skill_registry:
         skill_block = ctx.skill_registry.to_prompt_block()
         if skill_block:
             system_text += "\n" + skill_block
 
-    # P1: 显式 Plan 追踪 — 将进度报告注入 System Prompt
+    # 计划追踪指令（静态内容，附加到稳定 system prompt 后）
     if ctx.steps_tracker:
-        progress = ctx.steps_tracker.get_progress()
-        if progress:
-            system_text += "\n\n" + progress + "\n"
         system_text += (
             "\n## 计划追踪\n"
             "你可以使用以下方式来汇报你的计划进度：\n"
@@ -187,6 +211,44 @@ async def _run_agent_loop(ctx: AgentContext) -> str:
         )
 
     messages: list = [SystemMessage(content=system_text)]
+
+    # 动态进度信息作为独立消息追加（避免污染稳定前缀，保护 prefix cache）
+    if ctx.steps_tracker:
+        progress = ctx.steps_tracker.get_progress()
+        if progress:
+            messages.append(SystemMessage(content=progress))
+
+    # 额外的系统指令作为独立 SystemMessage 追加（而非拼入主 System Prompt）
+    # 保持基础 System Prompt 跨角色稳定，使 prefix cache 可复用
+    system_extra = ctx.metadata.get("system_extra", "")
+    if system_extra:
+        messages.append(SystemMessage(content=system_extra))
+
+    # 任务作为 HumanMessage 发送（而非拼入 System Prompt）
+    # 保持 System Prompt 跨任务稳定，使 prefix cache 可复用
+    task = ctx.metadata.get("task", "")
+    if task:
+        messages.append(HumanMessage(content=task))
+
+    # P2: Cache Advisor — 前缀缓存命中诊断
+    # 序列化前 3 条消息作为前缀（覆盖 System Prompt + 动态指令 + 任务）
+    try:
+        current_prefix = json.dumps(
+            [{"role": m.type, "content": str(m.content)[:200]} for m in messages[:3]],
+            ensure_ascii=False,
+        )
+    except Exception:
+        current_prefix = ""
+
+    last_prefix = ctx.metadata.get("_last_prefix", "")
+    if last_prefix and current_prefix:
+        matched, total = _estimate_prefix_match(last_prefix, current_prefix)
+        if ctx.verbose:
+            if matched > 0:
+                print(f"[Cache] HIT: {matched}/{total} chars ({matched / max(total, 1) * 100:.1f}%)")
+            else:
+                print("[Cache] MISS: prefix changed")
+    ctx.metadata["_last_prefix"] = current_prefix
 
     # P2: 工具调用去重与熔断
     deduper = ToolCallDeduper()
@@ -259,7 +321,7 @@ async def _run_agent_loop(ctx: AgentContext) -> str:
 
                 ctx.event_bus and await ctx.event_bus.publish(
                     SubagentEvent(EventType.TOOL_CALL, ctx.agent_id, ctx.agent_name,
-                                  _format_tool_action(tool_name, tool_args), depth))
+                                  _format_tool_action(tool_id, tool_name, tool_args), depth))
 
                 # P2: 熔断检测
                 deduper.register_call(tool_name, tool_args)
@@ -482,4 +544,6 @@ async def _handle_agent_eval(ctx: AgentContext, args: dict) -> str:
 
 
 def _build_subagent_tools(ctx: AgentContext) -> list[BaseTool]:
-    return ctx.tools
+    tools = list(ctx.tools)
+    tools.sort(key=lambda t: t.name)
+    return tools

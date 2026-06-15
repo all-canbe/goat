@@ -58,6 +58,7 @@ from goat.agent.subagent_runtime import (
     AgentContext, _run_agent_loop, _build_subagent_tools, MAX_AGENT_TURNS,
     looks_like_final_answer, continuation_prompt,
 )
+from goat.agent.plan_runner import PlanRunner, PlanResult
 from goat.agent.skill_system import (
     SkillRegistry, Skill,
     load_skill_from_directory,
@@ -385,6 +386,9 @@ class CLI:
         self.approval_system = ToolApprovalSystem()
         self.approval_system.auto_configure()
         self.approval_system.set_mode(PermissionMode.DEFAULT)
+
+        from goat.tools.tools import set_plan_workspace
+        set_plan_workspace(self.workspace)
 
         self.hook_system = HookLifecycleSystem()
         if settings and "hooks" in settings:
@@ -925,12 +929,89 @@ class CLI:
         else:
             print(f"\n  📝 继续完善计划...", flush=True)
 
+    async def _do_plan(self, message: str) -> None:
+        """Plan 模式独立循环: Explore → Plan → Phase 3 审批 → 执行。
+
+        与 Agent 模式不同，Plan 模式无 "纯文本=任务完成" 约束：
+        - Explore 阶段：LLM 自由输出文本分析，完成标记为 "## 进入规划"
+        - Plan 阶段：LLM 生成计划文档，完成标记为 save_plan_doc 工具调用或 "## 计划完成"
+        """
+        from goat.tools.tools import get_tools_by_names
+
+        plan_tools = get_tools_by_names(
+            ROLE_REGISTRY[RoleType.PLAN].allowed_tools,
+        )
+        print(f"  🔍 Plan 模式 — 开始探索代码库...", flush=True)
+
+        runner = PlanRunner(
+            llm=self.llm,
+            tools=plan_tools,
+            conversations=self.conversations,
+            event_bus=self.event_bus,
+            workspace=self.workspace,
+            cancel_token=self.cancel_token,
+            agent_id=self.main_agent_id,
+        )
+
+        result = await runner.run(message)
+
+        if result.phase == "cancelled":
+            print(f"\n  ⚠️ Plan 模式被取消", flush=True)
+            return
+
+        if not result.plan_content.strip():
+            print(f"\n  ⚠️ Plan 模式未能生成完整计划", flush=True)
+            return
+
+        print(f"\n{'─' * 50}", flush=True)
+        print(f"  📋 Plan 已完成", flush=True)
+        print(f"{'─' * 50}", flush=True)
+        if result.plan_path:
+            print(f"  📄 计划文件: {result.plan_path}")
+        print()
+        print(f"  (a) Agent 模式执行   → 切换到 Agent 模式，逐步执行（每次确认）")
+        print(f"  (y) YOLO 模式执行    → 切换到 YOLO 模式，自动执行")
+        print(f"  (n) 继续修改          → 保持 Plan 模式，继续完善计划")
+        print()
+
+        loop = asyncio.get_event_loop()
+        choice = await loop.run_in_executor(
+            None, lambda: input("  请选择 [a/y/n]: ").strip().lower()
+        )
+
+        if choice in ("a", "agent"):
+            self.approval_system.set_mode(PermissionMode.DEFAULT)
+            print(f"\n  🤖 已切换到 Agent 模式，开始执行计划...\n", flush=True)
+            await self.conversations.add_message(
+                HumanMessage(content=f"计划内容已保存到 {result.plan_path}，请按照计划逐步执行。")
+            )
+            await self._do_chat(f"请按照以下计划逐步执行：\n\n{result.plan_content}")
+        elif choice in ("y", "yolo"):
+            self.approval_system.set_mode(PermissionMode.YOLO)
+            print(f"\n  🤖 已切换到 YOLO 模式，开始自动执行计划...\n", flush=True)
+            await self.conversations.add_message(
+                HumanMessage(content=f"计划内容已保存到 {result.plan_path}，请按照计划自动执行。")
+            )
+            await self._do_chat(f"请按照以下计划自动执行：\n\n{result.plan_content}")
+        else:
+            print(f"\n  📝 继续完善计划...\n", flush=True)
+            await self._do_plan("请继续完善上述计划")
+
     async def _do_chat(self, message: str) -> None:
         is_flow_mode = (self.approval_system is not None and
                         self.approval_system.context.mode == PermissionMode.FLOW)
 
         if is_flow_mode and is_complex_task(message):
             await self._do_flow(message)
+            return
+
+        # Plan 模式走独立循环
+        is_plan_mode = (
+            self.approval_system is not None
+            and self.approval_system.context.mode == PermissionMode.PLAN
+        )
+        if is_plan_mode:
+            await self._do_plan(message)
             return
 
         """子Agent 对话: 流式输出 + 对话管理 + 可自定 spawn 子Agent"""
@@ -1043,7 +1124,7 @@ class CLI:
                         await self.conversations.add_message(response)
                         await self.conversations.add_message(HumanMessage(
                             content=continuation_prompt(continuation_count)
-                        ))
+                        ), extra_metadata={"hint": True})
                         print(f"    🔄 任务未完成，自动继续（{continuation_count}/{CLI._MAX_CONTINUATION_PROMPTS}）...", flush=True)
                         continue
                     else:

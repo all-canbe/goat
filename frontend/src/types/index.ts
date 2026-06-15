@@ -55,3 +55,8 @@ export interface PendingPlanCompare {
   originalPlan: string
   reviewedPlan: string
 }
+
+export interface PendingPlanComplete {
+  planPath: string
+  planContent: string
+}

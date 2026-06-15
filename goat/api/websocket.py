@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shlex
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import WebSocket
 
@@ -147,12 +147,16 @@ class WSManager:
             scope = sel.get("scope", "project")
             if not url:
                 continue
+            parsed = urlparse(url)
+            if parsed.scheme not in ('http', 'https'):
+                results.append({"url": url, "success": False, "error": "Invalid URL scheme: only http and https are allowed"})
+                continue
             try:
-                cmd = f"npx skills add {shlex.quote(url)}"
+                cmd_args = ["npx", "skills", "add", url]
                 if scope == "global":
-                    cmd += " --global"
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
+                    cmd_args.append("--global")
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -187,9 +191,10 @@ ws_manager = WSManager()
 
 
 class EventBusBridge:
-    def __init__(self, event_bus: EventBus, session_id: str = ""):
+    def __init__(self, event_bus: EventBus, session_id: str = "", session_manager=None):
         self._event_bus = event_bus
         self._session_id = session_id
+        self._session_manager = session_manager
         self._sub_id = f"ws_bridge_{id(self)}"
         self._task: asyncio.Task | None = None
 
@@ -203,10 +208,13 @@ class EventBusBridge:
     async def _poll_loop(self) -> None:
         queue = await self._event_bus.stream(self._sub_id)
         while True:
-            event = await queue.get()
-            msg = self._translate(event)
-            if msg:
-                await ws_manager.broadcast_to_all(msg)
+            try:
+                event = await queue.get()
+                msg = self._translate(event)
+                if msg:
+                    await ws_manager.broadcast_to_all(msg)
+            except Exception as e:
+                logger.exception("EventBusBridge 轮询异常: %s", e)
 
     def _translate(self, event: SubagentEvent) -> dict[str, Any] | None:
         sid = event.session_id or self._session_id
@@ -220,6 +228,16 @@ class EventBusBridge:
             try:
                 data = json.loads(event.payload) if isinstance(event.payload, str) else event.payload
                 if isinstance(data, dict):
+                    # Plan 模式完成 → 发送专用事件给前端审批
+                    if data.get("type") == "plan_complete":
+                        return {
+                            "type": "plan.complete",
+                            "payload": {
+                                "planPath": data.get("plan_path", ""),
+                                "planContent": data.get("plan_content", ""),
+                                "sessionId": sid,
+                            }
+                        }
                     mode = data.get("mode", event.payload)
                     token_count = data.get("tokenCount", 0)
                     token_input = data.get("tokenInput", 0)
@@ -240,19 +258,27 @@ class EventBusBridge:
                 token_output = 0
                 cost = 0
                 message_count = 0
-            return {"type": "status.update", "payload": {"model": event.agent_name, "provider": "", "mode": mode, "tokenCount": token_count, "tokenInput": token_input, "tokenOutput": token_output, "cost": cost, "messageCount": message_count, "toolRunning": False, "isThinking": False, "hasPendingApproval": False, "sessionId": sid}}
+            # compute contextPct from session token usage
+            context_pct = 0.0
+            if self._session_manager and hasattr(self._session_manager, 'conversations'):
+                conv = self._session_manager.conversations
+                if conv:
+                    usage = conv.get_token_usage(sid)
+                    if usage["max_tokens"] > 0:
+                        context_pct = round((usage["total_tokens"] / usage["max_tokens"]) * 100, 1)
+            return {"type": "status.update", "payload": {"model": event.agent_name, "provider": "", "mode": mode, "tokenCount": token_count, "tokenInput": token_input, "tokenOutput": token_output, "cost": cost, "messageCount": message_count, "contextPct": context_pct, "toolRunning": False, "isThinking": False, "hasPendingApproval": False, "sessionId": sid}}
         if event.event_type == EventType.TOOL_CALL:
             try:
                 data = json.loads(event.payload) if isinstance(event.payload, str) else event.payload
-                return {"type": "tool.require_approval", "payload": {"toolCallId": data.get("id", ""), "toolName": data.get("name", ""), "args": data.get("args", {}), "description": data.get("description", ""), "riskLevel": data.get("riskLevel", ""), "diffContent": data.get("diffContent", ""), "sessionId": sid}}
+                return {"type": "tool.require_approval", "payload": {"toolCallId": data.get("id", ""), "toolName": data.get("tool_name", data.get("name", event.agent_name)), "args": data.get("args", {}), "description": data.get("description", ""), "riskLevel": data.get("riskLevel", ""), "diffContent": data.get("diffContent", ""), "sessionId": sid}}
             except (json.JSONDecodeError, TypeError):
-                return {"type": "tool.require_approval", "payload": {"toolCallId": "", "toolName": event.payload, "args": {}, "description": "", "riskLevel": "", "diffContent": "", "sessionId": sid}}
+                return {"type": "tool.require_approval", "payload": {"toolCallId": "", "toolName": event.agent_name or "", "args": {}, "description": "", "riskLevel": "", "diffContent": "", "sessionId": sid}}
         if event.event_type == EventType.TOOL_RESULT:
             try:
                 data = json.loads(event.payload) if isinstance(event.payload, str) else event.payload
-                return {"type": "tool.complete", "payload": {"toolName": data.get("name", ""), "result": data.get("result", ""), "sessionId": sid}}
+                return {"type": "tool.complete", "payload": {"toolName": data.get("name", event.agent_name), "result": data.get("result", ""), "args": data.get("args", {}), "sessionId": sid}}
             except (json.JSONDecodeError, TypeError):
-                return {"type": "tool.complete", "payload": {"toolName": "", "result": event.payload, "sessionId": sid}}
+                return {"type": "tool.complete", "payload": {"toolName": event.agent_name or "", "result": event.payload, "sessionId": sid}}
         if event.event_type == EventType.MESSAGE:
             return {"type": "chat.system", "payload": {"messageId": "", "content": event.payload, "sessionId": sid}}
         if event.event_type == EventType.NOTIFICATION:
@@ -272,7 +298,7 @@ class EventBusBridge:
             self._task.cancel()
 
 
-def create_event_bridge(event_bus: EventBus, session_id: str = "") -> EventBusBridge:
-    bridge = EventBusBridge(event_bus, session_id)
+def create_event_bridge(event_bus: EventBus, session_id: str = "", session_manager=None) -> EventBusBridge:
+    bridge = EventBusBridge(event_bus, session_id, session_manager=session_manager)
     bridge.start()
     return bridge

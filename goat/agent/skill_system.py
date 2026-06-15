@@ -235,7 +235,7 @@ class SkillRegistry:
         return loaded
 
     def to_prompt_block(self) -> str:
-        skills = self.list_all()
+        skills = sorted(self.list_all(), key=lambda s: s.name)
         if not skills:
             return ""
         blocks = [s.to_prompt() for s in skills]

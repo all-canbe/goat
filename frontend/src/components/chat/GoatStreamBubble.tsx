@@ -2,6 +2,8 @@ import { useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Bot, AlertCircle, RotateCcw, Square } from 'lucide-react'
+import ToolCallCard from './ToolCallCard'
+import type { ToolCall } from '@/types'
 
 type BubbleStatus = 'thinking' | 'streaming' | 'error'
 
@@ -9,6 +11,7 @@ interface GoatStreamBubbleProps {
   status: BubbleStatus
   content?: string
   error?: string
+  pendingToolCalls?: ToolCall[]
   onRetry?: () => void
   onCancel?: () => void
 }
@@ -44,7 +47,7 @@ function StatusIndicator({ status }: { status: BubbleStatus }) {
   return null
 }
 
-export default function GoatStreamBubble({ status, content, error, onRetry, onCancel }: GoatStreamBubbleProps) {
+export default function GoatStreamBubble({ status, content, error, pendingToolCalls, onRetry, onCancel }: GoatStreamBubbleProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   // 自动滚动
@@ -102,10 +105,19 @@ export default function GoatStreamBubble({ status, content, error, onRetry, onCa
       </div>
       <div className="flex-1 min-w-0">
         {content ? (
-          <div className="prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-            <StatusIndicator status={status} />
-          </div>
+          <>
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              <StatusIndicator status={status} />
+            </div>
+            {pendingToolCalls && pendingToolCalls.length > 0 && (
+              <div className="mt-2 border-t border-border/30 pt-2 space-y-1">
+                {pendingToolCalls.map((tc, i) => (
+                  <ToolCallCard key={`pending-tc-${i}`} toolCall={tc} />
+                ))}
+              </div>
+            )}
+          </>
         ) : (
           <HoofprintDots />
         )}

@@ -29,6 +29,7 @@ export default function MessageList() {
   const messages = activeState?.messages ?? []
   const streamingContent = activeState?.streamingContent ?? ''
   const isStreaming = activeState?.isStreaming ?? false
+  const pendingToolCalls = activeState?.pendingToolCalls ?? []
   const searchResults = useChatStore((s) => s.searchResults)
   const activeSearchIndex = useChatStore((s) => s.activeSearchIndex)
   const isSearchActive = useChatStore((s) => s.isSearchActive)
@@ -142,6 +143,7 @@ export default function MessageList() {
           status={activeState?.streamError ? 'error' : streamingContent ? 'streaming' : 'thinking'}
           content={streamingContent}
           error={activeState?.streamError || undefined}
+          pendingToolCalls={pendingToolCalls}
           onRetry={() => (window as any).__retryLast?.()}
           onCancel={() => {
             const sid = useChatStore.getState().activeSessionId || 'default'

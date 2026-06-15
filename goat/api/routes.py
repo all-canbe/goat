@@ -244,6 +244,9 @@ async def get_messages(session_id: str):
     records = list(messages)
     records.reverse()
 
+    # Filter out hint messages (internal prompts, not shown to users)
+    records = [m for m in records if not (m.metadata or {}).get("hint")]
+
     tool_results: list[dict] = []
     assistant_tool_call_indices: list[int] = []
 

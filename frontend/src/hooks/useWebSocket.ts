@@ -3,7 +3,7 @@ import { WSClient } from '@/lib/ws-client'
 import { useChatStore } from '@/stores/chatStore'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import type { PendingApproval, PendingPlanCompare, PermissionMode, ToolCall } from '@/types'
+import type { PendingApproval, PendingPlanCompare, PendingPlanComplete, PermissionMode, ToolCall } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 function getSessionId(msg: any): string {
@@ -121,6 +121,16 @@ export function useWebSocket() {
       useChatStore.getState().setPendingPlanCompare(sid, pending)
     })
 
+    const unsubPlanComplete = client.on('plan.complete', (msg) => {
+      const activeSid = useSessionStore.getState().activeSessionId
+      const sid = activeSid || getSessionId(msg)
+      const pending: PendingPlanComplete = {
+        planPath: (msg.payload.planPath as string) || '',
+        planContent: (msg.payload.planContent as string) || '',
+      }
+      useChatStore.getState().setPendingPlanComplete(sid, pending)
+    })
+
     const unsubNotification = client.on('status.notification', (msg) => {
       const text = msg.payload.text as string
       if (text) {
@@ -199,6 +209,7 @@ export function useWebSocket() {
       unsubToolComplete()
       unsubAskUser()
       unsubPlanCompare()
+      unsubPlanComplete()
       unsubNotification()
       unsubSubagentLifecycle()
       unsubAuditLog()

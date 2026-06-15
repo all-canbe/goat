@@ -523,9 +523,8 @@ class FlowPipeline:
         role_def = copy(get_role(role_type))
         if self._project_context:
             role_def.system_prompt = role_def.system_prompt + self._project_context
-        if system_extra:
-            role_def.system_prompt = role_def.system_prompt + "\n\n" + system_extra
-        role_def.system_prompt = role_def.system_prompt + f"\n\n---\n{task}\n---"
+        # system_extra 不再拼入 System Prompt，而是通过 metadata 传递
+        # 由 _run_agent_loop 作为独立 SystemMessage 追加，保持基础 System Prompt 稳定
         tools = get_tools_by_names(role_def.allowed_tools)
 
         agent = await self.manager.spawn(
@@ -551,6 +550,7 @@ class FlowPipeline:
             approval_system=self.approval_system,
             hook_system=self.hook_system,
             depth=0,
+            metadata={"task": task, "system_extra": system_extra},
         )
 
         agent.status = SubAgentStatus.RUNNING

@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { Settings, Sun, Moon } from 'lucide-react'
 import { useConnectionStore } from '@/stores/connectionStore'
 import { useChatStore } from '@/stores/chatStore'
-import type { PermissionMode } from '@/types'
+import { useSessionStore } from '@/stores/sessionStore'
+import type { PermissionMode, PendingPlanComplete } from '@/types'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 
 const MODE_COLORS: Record<PermissionMode, string> = {
@@ -29,6 +30,49 @@ function getInitialTheme(): boolean {
   } catch {
     return false
   }
+}
+
+function ContextRing({ pct }: { pct: number }) {
+  const size = 16
+  const stroke = 2
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const clamped = Math.max(0, Math.min(100, pct))
+  const offset = c - (clamped / 100) * c
+  const colorClass =
+    clamped >= 80 ? 'text-error' : clamped >= 60 ? 'text-warning' : 'text-primary-light'
+  return (
+    <div
+      className="flex items-center gap-1.5 select-none"
+      title={`\u4E0A\u4E0B\u6587\u4F7F\u7528: ${clamped.toFixed(1)}%`}
+    >
+      <svg width={size} height={size} className="-rotate-90">
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={stroke}
+          className="text-text-darker"
+          opacity={0.5}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={stroke}
+          strokeDasharray={c}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          className={colorClass}
+        />
+      </svg>
+      <span className={`${colorClass} tabular-nums`}>{Math.round(clamped)}%</span>
+    </div>
+  )
 }
 
 export default function StatusBar() {
@@ -65,11 +109,38 @@ export default function StatusBar() {
   }
 
   const handleModeClick = () => {
+    const prevMode = mode
     const next = MODE_NEXT[mode]
     setMode(next)
     const ws = getWsClient()
     if (ws) {
       ws.send('mode.change', { mode: next })
+    }
+    // Plan → Agent/YOLO/Flow 自动触发计划执行
+    if (prevMode === 'plan' && (next === 'agent' || next === 'yolo' || next === 'flow')) {
+      const sessionId = useSessionStore.getState().activeSessionId
+      if (!sessionId) return
+      const pending: PendingPlanComplete | null =
+        useChatStore.getState().sessions[sessionId]?.pendingPlanComplete ?? null
+      if (pending?.planPath) {
+        // 清除 pending 状态，避免重复触发
+        useChatStore.getState().setPendingPlanComplete(sessionId, null)
+        // 自动发送执行消息
+        const execMsg = `请读取计划文件 ${pending.planPath} 并按照计划逐步实现。`
+        const sStore = useSessionStore.getState()
+        const realSessionId = sStore.activeSessionId ?? sessionId
+        const store = useChatStore.getState()
+        store.clearStream(realSessionId)
+        store.addMessage(realSessionId, {
+          id: crypto.randomUUID(),
+          role: 'user',
+          content: execMsg,
+          timestamp: Date.now(),
+        })
+        store.setLastUserInput(realSessionId, execMsg, [])
+        store.startStream(realSessionId)
+        ws.send('chat.send', { text: execMsg, sessionId: realSessionId })
+      }
     }
   }
 
@@ -136,7 +207,6 @@ export default function StatusBar() {
 
       <span className={statusTextColor}>{statusText}</span>
 
-      {contextPct > 0 && <span className="text-text-darker">上下文: {contextPct}%</span>}
       {(tokenInput > 0 || tokenOutput > 0) ? (
         <>
           {tokenInput > 0 && <span className="text-text-darker">IN: {tokenInput}</span>}
@@ -155,6 +225,8 @@ export default function StatusBar() {
       >
         {isLight ? <Moon size={13} /> : <Sun size={13} />}
       </button>
+
+      {contextPct >= 0 && <ContextRing pct={contextPct} />}
 
       <button
         onClick={() => setSettingsOpen(true)}

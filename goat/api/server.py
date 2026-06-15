@@ -22,7 +22,7 @@ def create_app(workspace: str | None = None) -> FastAPI:
     async def on_startup():
         await web_chat_handler.initialize(workspace=workspace)
         ws_manager.set_session_manager(web_chat_handler)
-        create_event_bridge(web_chat_handler.event_bus)
+        create_event_bridge(web_chat_handler.event_bus, session_manager=web_chat_handler)
 
     app.add_middleware(
         CORSMiddleware,

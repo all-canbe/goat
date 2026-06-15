@@ -102,13 +102,7 @@ class McpToolWrapper(BaseTool):
         return self._session
 
     async def _arun(self, **kwargs) -> str:
-        if self._event_bus:
-            self._event_bus.publish_nowait(
-                source_id="mcp_client",
-                event_type=EventType.TOOL_CALL,
-                payload=f"mcp:{self._connection.name}:{self.name}",
-                agent_name=f"mcp:{self.name}",
-            )
+        # TOOL_CALL 事件由 mcp_dispatch.py 发射，此处不重复发布
 
         try:
             session = await self._ensure_session()

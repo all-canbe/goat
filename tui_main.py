@@ -1253,7 +1253,12 @@ async def _do_chat(
 
             event_bus.publish_nowait(
                 "tool", EventType.TOOL_CALL,
-                json.dumps({"tool_name": tc_name, "args": tc_args, "tool_call_id": tc_id}),
+                json.dumps({
+                    "id": tc_id,
+                    "tool_name": tc_name,
+                    "args": tc_args,
+                    "description": describe_tool_action(tc_name, tc_args),
+                }, ensure_ascii=False),
                 agent_name="assistant",
             )
 

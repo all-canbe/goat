@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from langchain_core.tools import BaseTool
 
-from ..tools.tools import BUILTIN_TOOLS
+from ..tools.tools import BUILTIN_TOOLS, describe_tool_action
 from ..core.event_bus import EventBus, EventType
 
 
@@ -127,7 +127,7 @@ async def dispatch_mcp_call(
         opts.event_bus.publish_nowait(
             source_id=opts.source_id,
             event_type=EventType.TOOL_CALL,
-            payload=json.dumps({"tool_name": tool_name, "args": _summarize_mcp_params(tool_name, params)}),
+            payload=json.dumps({"tool_name": tool_name, "args": params, "description": describe_tool_action(tool_name, params)}),
             agent_name=f"mcp:{tool_name}",
         )
 

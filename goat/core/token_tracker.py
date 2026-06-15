@@ -95,6 +95,7 @@ class TokenTracker:
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
         self._total_cost: float = 0.0
+        self._last_prefix: str = ""
 
     @property
     def model(self) -> str:
@@ -184,3 +185,31 @@ class TokenTracker:
         self._total_input_tokens = 0
         self._total_output_tokens = 0
         self._total_cost = 0.0
+        self._last_prefix = ""
+
+    def estimate_cache_hit(self, previous_prefix: str, current_prefix: str) -> dict:
+        if not previous_prefix or not current_prefix:
+            return {"hit": False, "matched_chars": 0, "total_chars": len(current_prefix), "hit_rate": 0.0}
+
+        matched = 0
+        for a, b in zip(previous_prefix, current_prefix):
+            if a == b:
+                matched += 1
+            else:
+                break
+
+        total = len(current_prefix)
+        hit_rate = matched / max(total, 1)
+        return {
+            "hit": matched > 0,
+            "matched_chars": matched,
+            "total_chars": total,
+            "hit_rate": round(hit_rate, 4),
+        }
+
+    def log_cache_status(self, hit: bool, matched_tokens: int, total_tokens: int, reason: str = "") -> str:
+        if hit:
+            rate = (matched_tokens / max(total_tokens, 1)) * 100
+            return f"[Cache] HIT: {matched_tokens}/{total_tokens} tokens ({rate:.1f}%)"
+        else:
+            return f"[Cache] MISS: {reason}" if reason else "[Cache] MISS"

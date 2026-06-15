@@ -44,7 +44,7 @@ from .security.approval import (
 )
 
 # Tools
-from .tools.tools import (
+from .tools import (  # re-exports as write_file/delete_file/execute_command
     list_files, read_file, write_file, delete_file,
     move_file, copy_file, get_file_info, glob_search,
     FileEditTool, FileGrepTool, FILE_EDIT_TOOL, FILE_GREP_TOOL,

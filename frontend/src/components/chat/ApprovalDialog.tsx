@@ -41,19 +41,21 @@ export default function ApprovalDialog({ approval, onApprove, onReject }: Approv
             </div>
           )}
 
-          <div className="mb-3">
-            <span className="text-text-dim text-xs">工具名称</span>
-            <p className="text-text font-mono text-sm mt-0.5">{approval.toolName}</p>
+          {/* 意图描述 — 最醒目的展示区块 */}
+          <div className="mb-3 bg-primary/5 rounded p-3">
+            <div className="flex items-start gap-2">
+              <ShieldAlert size={16} className="text-primary mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-text whitespace-pre-wrap break-words">
+                  {approval.description
+                    ? approval.description
+                    : `工具 ${approval.toolName}（无说明）`}
+                </p>
+              </div>
+            </div>
           </div>
 
           <div className="mb-3">
-            <span className="text-text-dim text-xs">描述</span>
-            <p className="text-text text-sm mt-0.5 whitespace-pre-wrap break-words">
-              {approval.description || '无描述'}
-            </p>
-          </div>
-
-          <div>
             <span className="text-text-dim text-xs">参数</span>
             <pre className="mt-0.5 p-2 bg-surface-light rounded text-xs text-text-dim font-mono overflow-x-auto max-h-32 overflow-y-auto">
               {JSON.stringify(approval.args, null, 2)}
@@ -74,6 +76,11 @@ export default function ApprovalDialog({ approval, onApprove, onReject }: Approv
               </pre>
             </div>
           )}
+
+          {/* 工具名称 — 弱化展示 */}
+          <div className="mt-3 text-xs text-text-dim">
+            工具: {approval.toolName}
+          </div>
         </div>
 
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-border">

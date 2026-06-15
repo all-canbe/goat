@@ -22,6 +22,17 @@ from pydantic import BaseModel, Field
 from .retry import retry_sync, RetryConfig
 
 _exec_workspace: str | None = None
+_plan_workspace: Path | None = None
+
+def set_plan_workspace(workspace: Path) -> None:
+    global _plan_workspace
+    _plan_workspace = workspace
+
+def get_plan_workspace() -> Path:
+    global _plan_workspace
+    if _plan_workspace is not None:
+        return _plan_workspace
+    return Path.cwd()
 
 _RETRYABLE_NET = RetryConfig(
     max_retries=3,
@@ -347,43 +358,61 @@ def read_file(filepath: str, start_line: int = 1, end_line: int = -1) -> str:
     return header + "\n" + "\n".join(selected)
 
 
-@tool
-def write_file(filepath: str, content: str) -> str:
-    """写入内容到文件（覆盖模式）?
-    Args:
-        filepath: 文件路径
-        content: 要写入的内容
-    """
-    p = _safe_path(filepath)
-    try:
-        _write_file_content(p, content)
-        return f"写入成功: {filepath} ({len(content)} 字符)"
-    except Exception as e:
-        return f"错误: 写入文件失败: {e}"
+class WriteFileInput(BaseModel):
+    filepath: str = Field(description="文件路径")
+    content: str = Field(description="要写入的内容")
+    reason: str = Field(default="", description="解释为什么要做此操作（可选）")
 
 
-@tool
-def delete_file(filepath: str, recursive: bool = False) -> str:
-    """删除文件或目录?
-    Args:
-        filepath: 要删除的文件或目录路?        recursive: 如果目标是目录，是否递归删除，默?False
-    """
-    p = _safe_path(filepath)
-    if not p.exists():
-        return f"错误: 路径不存? {filepath}"
+class WriteFileTool(BaseTool):
+    name: str = "write_file"
+    description: str = "写入内容到文件（覆盖模式）"
+    args_schema: Type[BaseModel] = WriteFileInput
+    return_direct: bool = False
 
-    try:
-        if p.is_dir():
-            if recursive:
-                shutil.rmtree(p)
-                return f"已递归删除目录: {filepath}"
+    def _run(self, filepath: str, content: str, reason: str = "") -> str:
+        p = _safe_path(filepath)
+        try:
+            _write_file_content(p, content)
+            return f"写入成功: {filepath} ({len(content)} 字符)"
+        except Exception as e:
+            return f"错误: 写入文件失败: {e}"
+
+    async def _arun(self, filepath: str, content: str, reason: str = "") -> str:
+        return self._run(filepath, content, reason)
+
+
+class DeleteFileInput(BaseModel):
+    filepath: str = Field(description="要删除的文件或目录路径")
+    recursive: bool = Field(default=False, description="如果目标是目录，是否递归删除")
+    reason: str = Field(default="", description="解释为什么要做此操作（可选）")
+
+
+class DeleteFileTool(BaseTool):
+    name: str = "delete_file"
+    description: str = "删除文件或目录"
+    args_schema: Type[BaseModel] = DeleteFileInput
+    return_direct: bool = False
+
+    def _run(self, filepath: str, recursive: bool = False, reason: str = "") -> str:
+        p = _safe_path(filepath)
+        if not p.exists():
+            return f"错误: 路径不存? {filepath}"
+        try:
+            if p.is_dir():
+                if recursive:
+                    shutil.rmtree(p)
+                    return f"已递归删除目录: {filepath}"
+                else:
+                    return f"错误: '{filepath}' 是目录，请设?recursive=True 来递归删除"
             else:
-                return f"错误: '{filepath}' 是目录，请设?recursive=True 来递归删除"
-        else:
-            p.unlink()
-            return f"已删除文? {filepath}"
-    except Exception as e:
-        return f"错误: 删除失败: {e}"
+                p.unlink()
+                return f"已删除文? {filepath}"
+        except Exception as e:
+            return f"错误: 删除失败: {e}"
+
+    async def _arun(self, filepath: str, recursive: bool = False, reason: str = "") -> str:
+        return self._run(filepath, recursive, reason)
 
 
 @tool
@@ -443,7 +472,7 @@ def save_plan_doc(filename: str, content: str) -> str:
     if not safe_name.endswith('.md'):
         safe_name += '.md'
 
-    doc_dir = Path.cwd() / ".goat" / "doc"
+    doc_dir = get_plan_workspace() / ".goat" / "doc"
     doc_dir.mkdir(parents=True, exist_ok=True)
 
     target = (doc_dir / safe_name).resolve()
@@ -534,6 +563,10 @@ class FileEditInput(BaseModel):
     new_string: str = Field(
         description="替换后的新文本。留空则删除 old_string"
     )
+    reason: str = Field(
+        default="",
+        description="解释为什么要做此操作（可选）"
+    )
     partial: bool = Field(
         default=False,
         description="如果?True，old_string 只需是匹配内容的子串，不要求完全匹配"
@@ -600,7 +633,7 @@ class FileEditTool(BaseTool):
         return None
 
     def _run(self, file_path: str, old_string: str, new_string: str,
-             partial: bool = False, fuzz: bool = False) -> str:
+             partial: bool = False, fuzz: bool = False, reason: str = "") -> str:
         file_path = os.path.abspath(os.path.expanduser(file_path))
 
         safety_error = self._check_safety(file_path, old_string, new_string)
@@ -672,8 +705,8 @@ class FileEditTool(BaseTool):
         )
 
     async def _arun(self, file_path: str, old_string: str, new_string: str,
-                    partial: bool = False, fuzz: bool = False) -> str:
-        return self._run(file_path, old_string, new_string, partial, fuzz)
+                    partial: bool = False, fuzz: bool = False, reason: str = "") -> str:
+        return self._run(file_path, old_string, new_string, partial, fuzz, reason=reason)
 
 
 # ============================================================================
@@ -998,63 +1031,84 @@ def search_code(directory: str, query: str, file_pattern: str = "*",
 # 5. Shell 命令执行
 # ============================================================================
 
-@tool
-def execute_command(command: str, working_dir: str = ".", timeout: int = 60) -> str:
+class ExecuteCommandInput(BaseModel):
+    command: str = Field(description="要执行的命令")
+    working_dir: str = Field(default=".", description="工作目录")
+    timeout: int = Field(default=60, description="超时时间（秒）")
+    reason: str = Field(default="", description="解释为什么要做此操作（可选）")
+
+
+class ExecuteCommandTool(BaseTool):
     """执行 shell 命令并返回输出?
     安全特性：
-    - 严格模式命令黑名单（YOLO 模式下也不可绕过?    - 工作目录逃逸检?    - 敏感环境变量自动过滤
+    - 严格模式命令黑名单（YOLO 模式下也不可绕过?
+    - 工作目录逃逸检?
+    - 敏感环境变量自动过滤
     - shell 注入防护（优?shell=False 无元字符执行?
-    Args:
-        command: 要执行的命令
-        working_dir: 工作目录
-        timeout: 超时时间（秒），默认 60
     """
-    wd = _safe_path(working_dir)
-    cmd_stripped = command.strip()
-    if not cmd_stripped:
-        return "错误: 命令为空"
-    cmd_stripped = _adapt_command_for_platform(cmd_stripped)
+    name: str = "execute_command"
+    description: str = """执行 shell 命令并返回输出?
+安全特性：
+- 严格模式命令黑名单（YOLO 模式下也不可绕过?
+- 工作目录逃逸检?
+- 敏感环境变量自动过滤
+- shell 注入防护（优?shell=False 无元字符执行?
+Args:
+    command: 要执行的命令
+    working_dir: 工作目录
+    timeout: 超时时间（秒），默认 60
+"""
+    args_schema: Type[BaseModel] = ExecuteCommandInput
+    return_direct: bool = False
 
-    # 1. 命令黑名单检查（最高优先级，YOLO 模式也不可绕过）
-    blacklist_error = _check_command_blacklist(cmd_stripped)
-    if blacklist_error:
-        return blacklist_error
+    def _run(self, command: str, working_dir: str = ".", timeout: int = 60, reason: str = "") -> str:
+        wd = _safe_path(working_dir)
+        cmd_stripped = command.strip()
+        if not cmd_stripped:
+            return "错误: 命令为空"
+        cmd_stripped = _adapt_command_for_platform(cmd_stripped)
 
-    # 2. 工作目录逃逸检?    escape_error = _detect_escape_attempt(cmd_stripped)
-    if escape_error:
-        return escape_error
+        blacklist_error = _check_command_blacklist(cmd_stripped)
+        if blacklist_error:
+            return blacklist_error
 
-    # 3. 环境变量过滤（移除敏感键值）
-    safe_env = _sanitize_environment()
+        escape_error = _detect_escape_attempt(cmd_stripped)
+        if escape_error:
+            return escape_error
 
-    # 4. 尝试 shell=False 执行（优先防注入?    args = _try_split_command(cmd_stripped)
-    if args is not None:
-        use_shell = False
-    else:
-        use_shell = True
+        safe_env = _sanitize_environment()
 
-    try:
-        result = subprocess.run(
-            args if not use_shell else cmd_stripped,
-            shell=use_shell,
-            capture_output=True,
-            timeout=timeout, cwd=str(wd),
-            env=safe_env,
-        )
-        output = _decode_output(result.stdout).strip()
-        stderr_text = _decode_output(result.stderr).strip()
-        if stderr_text:
-            output += "\n[stderr]\n" + stderr_text
-        if not output:
-            output = f"命令执行成功 (exit code: {result.returncode})"
+        args = _try_split_command(cmd_stripped)
+        if args is not None:
+            use_shell = False
+        else:
+            use_shell = True
 
-        if len(output) > 50000:
-            output = output[:50000] + f"\n\n[输出截断，共 {len(output)} 字符]"
-        return output
-    except subprocess.TimeoutExpired:
-        return f"错误: 命令执行超时 ({timeout}?"
-    except Exception as e:
-        return _format_command_error(cmd_stripped, str(e))
+        try:
+            result = subprocess.run(
+                args if not use_shell else cmd_stripped,
+                shell=use_shell,
+                capture_output=True,
+                timeout=timeout, cwd=str(wd),
+                env=safe_env,
+            )
+            output = _decode_output(result.stdout).strip()
+            stderr_text = _decode_output(result.stderr).strip()
+            if stderr_text:
+                output += "\n[stderr]\n" + stderr_text
+            if not output:
+                output = f"命令执行成功 (exit code: {result.returncode})"
+
+            if len(output) > 50000:
+                output = output[:50000] + f"\n\n[输出截断，共 {len(output)} 字符]"
+            return output
+        except subprocess.TimeoutExpired:
+            return f"错误: 命令执行超时 ({timeout}?"
+        except Exception as e:
+            return _format_command_error(cmd_stripped, str(e))
+
+    async def _arun(self, command: str, working_dir: str = ".", timeout: int = 60, reason: str = "") -> str:
+        return self._run(command, working_dir, timeout, reason=reason)
 
 
 @tool
@@ -1627,14 +1681,17 @@ def git_cherry_pick(commits: str, no_commit: bool = False) -> str:
 # ============================================================================
 # 工具注册?# ============================================================================
 
+WRITE_FILE_TOOL = WriteFileTool()
+DELETE_FILE_TOOL = DeleteFileTool()
+EXECUTE_COMMAND_TOOL = ExecuteCommandTool()
 FILE_EDIT_TOOL = FileEditTool()
 FILE_GREP_TOOL = FileGrepTool()
 
 BUILTIN_TOOLS = {
     "list_files": list_files,
     "read_file": read_file,
-    "write_file": write_file,
-    "delete_file": delete_file,
+    "write_file": WRITE_FILE_TOOL,
+    "delete_file": DELETE_FILE_TOOL,
     "move_file": move_file,
     "copy_file": copy_file,
     "get_file_info": get_file_info,
@@ -1642,7 +1699,7 @@ BUILTIN_TOOLS = {
     "file_edit": FILE_EDIT_TOOL,
     "file_grep": FILE_GREP_TOOL,
     "search_code": search_code,
-    "execute_command": execute_command,
+    "execute_command": EXECUTE_COMMAND_TOOL,
     "async_execute_command": async_execute_command,
     "web_search": web_search,
     "web_fetch": web_fetch,
@@ -1703,7 +1760,102 @@ def get_all_tools() -> list:
 
 
 def get_tools_by_names(names: list[str]) -> list:
-    return [BUILTIN_TOOLS[n] for n in names if n in BUILTIN_TOOLS]
+    tools = [BUILTIN_TOOLS[n] for n in names if n in BUILTIN_TOOLS]
+    tools.sort(key=lambda t: t.name)
+    return tools
+
+
+# ============================================================================
+# 工具调用描述生成器（用于审批弹窗展示 LLM 意图）
+# ============================================================================
+
+def describe_tool_action(name: str, args: dict) -> str:
+    """根据工具名和参数生成人类可读的工具调用意图描述。
+
+    - 优先从 args 中读取 LLM 主动提供的 reason/purpose/description
+    - 降级为基于参数的自动描述
+    """
+    llm_reason = args.get("reason") or args.get("purpose") or args.get("description")
+    if llm_reason and isinstance(llm_reason, str) and llm_reason.strip():
+        return llm_reason.strip()[:200]
+
+    if name in ("write_file",):
+        fp = args.get("filepath", "?")
+        content = args.get("content", "")
+        return f"将 {len(content)} 字符的内容写入文件 {fp}"
+    if name in ("read_file", "get_file_info"):
+        return f"读取文件 {args.get('filepath', args.get('file_path', '?'))}"
+    if name in ("delete_file",):
+        extra = "（递归删除）" if args.get("recursive") else ""
+        return f"删除 {args.get('filepath', '?')}{extra}"
+    if name in ("move_file",):
+        return f"将 {args.get('source', '?')} 移动到 {args.get('destination', '?')}"
+    if name in ("copy_file",):
+        return f"将 {args.get('source', '?')} 复制到 {args.get('destination', '?')}"
+    if name in ("file_edit",):
+        fp = args.get("file_path", "?")
+        old = (args.get("old_string", "") or "")[:30]
+        new = (args.get("new_string", "") or "")[:30]
+        return f"编辑文件 {fp}：\"{old}\" → \"{new}\""
+    if name in ("glob_search",):
+        return f"在 {args.get('directory', '.')} 中搜索匹配 {args.get('pattern', '?')} 的文件"
+    if name in ("list_files",):
+        return f"列出 {args.get('directory', '.')} 中的文件"
+    if name in ("file_grep", "search_code"):
+        return f"在 {args.get('path', '.')} 中搜索 \"{args.get('query') or args.get('pattern', '')}\""
+    if name in ("execute_command", "async_execute_command"):
+        cmd = (args.get("command", "") or "")[:80]
+        return f"执行命令：{cmd}"
+    if name in ("web_search",):
+        return f"搜索网络：{args.get('query', '?')}"
+    if name in ("web_fetch",):
+        return f"抓取网页：{args.get('url', '?')}"
+    if name in ("git_status",):
+        return "查看 Git 状态"
+    if name in ("git_diff",):
+        return "查看 Git 差异"
+    if name in ("git_log",):
+        return "查看 Git 提交历史"
+    if name in ("git_blame",):
+        return "查看 Git blame 信息"
+    if name in ("git_commit",):
+        msg = (args.get("message", "") or "")[:50]
+        return f"提交 Git 变更：\"{msg}\""
+    if name in ("git_branch",):
+        action = args.get("action", "list")
+        branch = args.get("name", "")
+        if action == "create":
+            return f"创建 Git 分支 {branch}"
+        if action == "delete":
+            return f"删除 Git 分支 {branch}"
+        return "列出 Git 分支"
+    if name in ("git_stash",):
+        action = args.get("action", "list")
+        action_labels = {"list": "列出", "push": "暂存", "pop": "恢复并删除", "apply": "恢复", "drop": "删除", "show": "查看"}
+        return f"Git stash：{action_labels.get(action, action)} 当前变更"
+    if name in ("git_restore",):
+        return f"从 {args.get('source', 'HEAD')} 恢复 {args.get('path', '?')}"
+    if name in ("git_cherry_pick",):
+        return f"应用提交 {args.get('commits', '?')}"
+    if name in ("ask_user",):
+        q = (args.get("question", "") or "")[:60]
+        return f"询问用户：{q}"
+    if name in ("notify",):
+        msg = (args.get("message", "") or "")[:60]
+        return f"发送通知：{msg}"
+    if name in ("save_plan_doc",):
+        return f"保存计划文档 .goat/doc/{args.get('filename', '?')}"
+    if name in ("apply_patch",):
+        target = args.get("target_file", "") or ""
+        if not target:
+            target = "从补丁头解析"
+        return f"应用补丁到 {target}"
+    if name in ("find_skills",):
+        return f"搜索技能：{args.get('query', '?')}"
+
+    # fallback
+    keys = list(args.keys())[:3]
+    return f"调用 {name}（参数：{', '.join(k for k in keys if k not in ('reason',))}）"
 
 
 

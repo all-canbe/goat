@@ -20,6 +20,10 @@ class ApplyPatchInput(BaseModel):
         default=1,
         description="补丁路径前缀要去掉的层级数（相当于 patch -pN），默认 1",
     )
+    reason: str = Field(
+        default="",
+        description="解释为什么要做此操作（可选）",
+    )
 
 
 class ApplyPatchTool(BaseTool):
@@ -32,10 +36,10 @@ class ApplyPatchTool(BaseTool):
     args_schema: Type[BaseModel] = ApplyPatchInput
     return_direct: bool = False
 
-    def _run(self, patch: str, target_file: str = "", strip: int = 1) -> str:
+    def _run(self, patch: str, target_file: str = "", strip: int = 1, reason: str = "") -> str:
         return self._apply(patch, target_file, strip)
 
-    async def _arun(self, patch: str, target_file: str = "", strip: int = 1) -> str:
+    async def _arun(self, patch: str, target_file: str = "", strip: int = 1, reason: str = "") -> str:
         return self._apply(patch, target_file, strip)
 
     def _apply(self, patch: str, target_file: str = "", strip: int = 1) -> str:

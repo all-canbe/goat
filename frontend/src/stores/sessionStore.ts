@@ -105,7 +105,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const res = await fetch(`/api/sessions/${sessionId}/messages`)
       const data = await res.json()
       const rawMessages = data.messages || []
+      // 前端二次过滤: 排除 metadata.hint=True 的内部提示消息
       for (const m of rawMessages) {
+        if ((m.metadata?.hint)) continue
         chatStore.addMessage(sessionId, mapMessage(m))
       }
     } catch {

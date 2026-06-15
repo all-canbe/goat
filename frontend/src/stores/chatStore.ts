@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Message, PendingApproval, PendingQuestion, PendingPlanCompare, ToolCall, FileAttachment } from '@/types'
+import type { Message, PendingApproval, PendingQuestion, PendingPlanCompare, PendingPlanComplete, ToolCall, FileAttachment } from '@/types'
 
 interface SessionChatState {
   messages: Message[]
@@ -11,6 +11,7 @@ interface SessionChatState {
   pendingApproval: PendingApproval | null
   pendingQuestion: PendingQuestion | null
   pendingPlanCompare: PendingPlanCompare | null
+  pendingPlanComplete: PendingPlanComplete | null
   pendingToolCalls: ToolCall[]
 }
 
@@ -25,6 +26,7 @@ function getInitialState(): SessionChatState {
     pendingApproval: null,
     pendingQuestion: null,
     pendingPlanCompare: null,
+    pendingPlanComplete: null,
     pendingToolCalls: [],
   }
 }
@@ -58,6 +60,7 @@ interface ChatStore {
   setPendingApproval: (sessionId: string, approval: PendingApproval | null) => void
   setPendingQuestion: (sessionId: string, question: PendingQuestion | null) => void
   setPendingPlanCompare: (sessionId: string, planCompare: PendingPlanCompare | null) => void
+  setPendingPlanComplete: (sessionId: string, planComplete: PendingPlanComplete | null) => void
   addToolCall: (sessionId: string, toolCall: ToolCall) => void
   clearToolCalls: (sessionId: string) => void
 
@@ -108,6 +111,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const s = ensureState(updated, sessionId)
       // 空 token 不应启动流式占位(避免假启动);保留现有 streamingContent
       if (!token) return { sessions: updated }
+      // 若 streamingContent 刚被 commitStream 清空且 isStreaming 已 false,
+      // 说明该 token 属于已完成轮次,跳过避免虚假重新激活流式状态
+      if (!s.isStreaming && s.streamingContent === '') return { sessions: updated }
       updated[sessionId] = { ...s, streamingContent: s.streamingContent + token, isStreaming: true }
       return { sessions: updated }
     }),
@@ -151,6 +157,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingApproval: null,
         pendingQuestion: null,
         pendingPlanCompare: null,
+        pendingPlanComplete: null,
         pendingToolCalls: [],
       }
       return { sessions: updated }
@@ -214,6 +221,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const updated = { ...state.sessions }
       const s = ensureState(updated, sessionId)
       updated[sessionId] = { ...s, pendingPlanCompare: planCompare }
+      return { sessions: updated }
+    }),
+
+  setPendingPlanComplete: (sessionId, planComplete) =>
+    set((state) => {
+      const updated = { ...state.sessions }
+      const s = ensureState(updated, sessionId)
+      updated[sessionId] = { ...s, pendingPlanComplete: planComplete }
       return { sessions: updated }
     }),
 

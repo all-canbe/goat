@@ -4,6 +4,7 @@ import ChatArea from '@/components/chat/ChatArea'
 import ApprovalOverlay from '@/components/chat/ApprovalOverlay'
 import AskUserDialog from '@/components/chat/AskUserDialog'
 import PlanCompareOverlay from '@/components/chat/PlanCompareOverlay'
+import PlanCompleteOverlay from '@/components/chat/PlanCompleteOverlay'
 import CommandPalette from '@/components/command/CommandPalette'
 import FileEditor from '@/components/editor/FileEditor'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -55,6 +56,7 @@ function App() {
       <ApprovalOverlay />
       <AskUserDialog />
       <PlanCompareOverlay />
+      <PlanCompleteOverlay />
       <CommandPalette onOpenFile={handleOpenFile} onNewFile={handleNewFile} onEditFile={handleEditFile} />
       <FileEditor
         isOpen={fileEditorOpen}
