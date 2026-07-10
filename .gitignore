@@ -1,0 +1,28 @@
+# Rust
+target/
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node.js (for frontend subprojects)
+node_modules/
+dist/
+
+# Environment
+.env
+*.env.local
+
+# Logs
+*.log
+
+# RGoat runtime data
+.goat/

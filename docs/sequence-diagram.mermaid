@@ -1,0 +1,95 @@
+sequenceDiagram
+    participant U as 用户
+    participant A as App (TUI)
+    participant EB as EventBus
+    participant RA as ReActAgent
+    participant LLM as LLM Provider
+    participant AE as ApprovalEngine
+    participant AR as ApprovalResponder
+    participant CT as CancellationToken
+
+    %% === 用户输入 ===
+    U->>A: 输入消息 + Enter
+    A->>A: elements.push(User)
+    A->>A: is_processing=true, processing_start=now()
+    A->>RA: tokio::spawn(agent.run())
+
+    %% === LLM 流式调用 ===
+    RA->>LLM: chat_stream(messages, tools)
+
+    loop 流式文本（逐词）
+        LLM-->>RA: StreamChunk(delta.content="Hello world")
+        RA->>RA: 按空格分词
+        RA->>EB: emit(MessageDelta{delta:"Hello"})
+        EB-->>A: try_recv() → MessageDelta
+        A->>A: 追加到 AssistantStream.text
+        A->>A: render frame
+        RA->>EB: emit(MessageDelta{delta:"world"})
+        EB-->>A: try_recv() → MessageDelta
+        A->>A: 追加到 AssistantStream.text
+    end
+
+    %% === 工具调用 ===
+    LLM-->>RA: StreamChunk(delta.tool_calls)
+    RA->>RA: 累加构建 ToolCallDef
+    RA->>EB: emit(ToolCall{name:"bash", args:{command:"ls -la"}})
+    EB-->>A: try_recv() → ToolCall
+    A->>A: streaming_idx=None
+    A->>A: elements.push(ToolCard{name:"bash", collapsed:true})
+
+    %% === 审批检查（Shell 需审批） ===
+    RA->>AE: check(mode, "bash", Shell, args)
+    AE-->>RA: Decision::Ask
+    RA->>AR: create oneshot channel → store tx
+    RA->>EB: emit(ApprovalRequired{tool_name:"bash", tool_type:"Shell", command:"ls -la", risk:"LOW"})
+    EB-->>A: try_recv() → ApprovalRequired
+    A->>A: approval_dialog=Some(ShellDialog{command:"ls -la"})
+    A->>A: render modal overlay
+
+    alt 用户批准 (Y)
+        U->>A: 按 Y
+        A->>AR: take tx → send(ApprovalDecision{approved:true})
+        A->>A: approval_dialog=None
+        RA->>RA: rx.await → approved=true
+        RA->>RA: tools.execute("bash", args)
+        RA->>EB: emit(ToolResult{name:"bash", success:true, output:"..."})
+        EB-->>A: try_recv() → ToolResult
+        A->>A: 更新 ToolCard.output + 检测 diff
+    else 用户拒绝 (N)
+        U->>A: 按 N
+        A->>AR: take tx → send(ApprovalDecision{approved:false})
+        A->>A: approval_dialog=None
+        RA->>RA: rx.await → approved=false
+        RA->>EB: emit(ToolResult{name:"bash", success:false, output:"denied"})
+    end
+
+    %% === 后续轮次 ===
+    Note over RA,LLM: 重复流式 + 工具调用（如有）
+
+    %% === 完成 ===
+    LLM-->>RA: StreamChunk(finish_reason="stop", usage={...})
+    RA->>EB: emit(Usage{input_tokens:1500, output_tokens:800})
+    RA->>EB: emit(Finished{answer:"Done!", steps:3})
+    EB-->>A: try_recv() → Usage
+    A->>A: input_tokens=1500, output_tokens=800
+    EB-->>A: try_recv() → Finished
+    A->>A: streaming_idx=None
+    A->>A: is_processing=false
+    A->>A: elements.push(ToolTimeline{...})
+    A->>A: render frame
+
+    %% === Ctrl+C 中断（独立场景） ===
+    Note over U,CT: === Ctrl+C 中断场景 ===
+
+    RA->>RA: 执行中 (step 5/30)
+    U->>A: Ctrl+C (首次)
+    A->>A: ctrl_c_count=0, is_processing=true → ctrl_c_count=1
+    A->>CT: cancel()
+    RA->>RA: loop → cancellation.is_cancelled() → true
+    RA->>EB: emit(Cancelled{partial_answer:"..."})
+    EB-->>A: try_recv() → Cancelled
+    A->>A: elements.push(Error{"⚠ Cancelled"})
+    A->>A: is_processing=false, ctrl_c_count=0
+
+    U->>A: Ctrl+C (二次，Agent 已停止)
+    A->>A: is_processing=false → return Ok(()) → 退出

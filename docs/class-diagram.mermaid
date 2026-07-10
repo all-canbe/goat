@@ -1,0 +1,281 @@
+classDiagram
+    direction TB
+
+    %% ── rgoat-core 层 ──
+
+    class AgentEvent {
+        <<enumeration>>
+        Started { mode: String, prompt: String }
+        Thought { step: usize, content: String }
+        ToolCall { step: usize, tool_name: String, arguments: Value }
+        ToolResult { step: usize, tool_name: String, success: bool, output: String }
+        Approval { tool_name: String, decision: String, message: String }
+        Message { role: String, content: String }
+        MessageDelta { delta: String }
+        Usage { input_tokens: u64, output_tokens: u64 }
+        Cancelled { partial_answer: String }
+        ApprovalRequired { tool_name: String, tool_type: String, summary: String, risk_level: String, command: Option~String~, path: Option~String~, url: Option~String~ }
+        StepCompleted { step: usize, total_steps: usize }
+        Finished { answer: String, steps: usize }
+        Error { message: String }
+    }
+
+    class ApprovalDecision {
+        +approved: bool
+        +approve_all: bool
+    }
+
+    class ApprovalResponder {
+        <<type>>
+        Arc~Mutex~Option~oneshot::Sender~ApprovalDecision~~~
+    }
+
+    class ReActAgent {
+        +config: AgentConfig
+        +provider: Arc~dyn LlmProvider~
+        +tools: Arc~ToolRegistry~
+        +approval: Arc~ApprovalEngine~
+        +conversation: Arc~ConversationManager~
+        +event_bus: Arc~EventBus~
+        +cancellation: CancellationToken
+        +mode: AgentMode
+        +paused: Arc~AtomicBool~
+        +approval_responder: ApprovalResponder
+        +new(...) Self
+        +run(session_id, user_prompt, workspace) Result
+        +load_rules(workspace) Vec~String~
+        +load_skills(workspace) Vec~String~
+        -call_llm_with_streaming(messages, tools, step) Result
+        -build_messages(session_id, system_prompt) Result
+        -handle_tool_result(session_id, step, name, id, result) Result
+        -add_observation(session_id, tool_name, id, output, is_error) Result
+        -emit(event) ()
+        -tools_description() String
+    }
+
+    class EventBus {
+        +sender: broadcast::Sender~Event~
+        +new(capacity) Self
+        +subscribe() broadcast::Receiver~Event~
+        +emit(event_type, source, data) ()
+        +subscriber_count() usize
+    }
+
+    class EventType {
+        <<enumeration>>
+        MessageDelta
+        Usage
+        ApprovalRequired
+        AgentCancelled
+        LlmStreamChunk
+        LlmStreamDone
+        ToolCallStart
+        ToolCallResult
+        ...existing
+    }
+
+    class Event {
+        +event_type: EventType
+        +source: String
+        +data: serde_json::Value
+        +timestamp: DateTime~Utc~
+    }
+
+    class CancellationToken {
+        -cancelled: Arc~AtomicBool~
+        +new() Self
+        +cancel() ()
+        +is_cancelled() bool
+        +reset() ()
+    }
+
+    class ApprovalEngine {
+        -policies: Vec~ApprovalPolicy~
+        -rules: Vec~Box~dyn ApprovalRule~~
+        -bypass_immune_tools: HashSet~String~
+        +new() Self
+        +check(mode, tool_name, category, args) ApprovalResult
+    }
+
+    %% ── rgoat-tui 层 ──
+
+    class App {
+        +agent: Arc~ReActAgent~
+        +conversation: Arc~ConversationManager~
+        +event_rx: broadcast::Receiver~Event~
+        +switch: Arc~ProviderSwitch~
+        +approval_responder: ApprovalResponder
+        +session_id: String
+        +workspace: String
+        +elements: Vec~UiElement~
+        +input: String
+        +mode: AgentMode
+        +is_processing: bool
+        +input_tokens: u64
+        +output_tokens: u64
+        +processing_start: Option~Instant~
+        +git_branch: String
+        +current_step: usize
+        +max_steps: usize
+        +scroll_offset: usize
+        +streaming_idx: Option~usize~
+        +approval_dialog: Option~ApprovalDialog~
+        +ctrl_c_count: u8
+        +new(...) Self
+        +init() ()
+        +submit() ()
+        +handle_command(input) ()
+        +handle_agent_event(event) ()
+        +handle_key(key) ()
+        +poll_events() ()
+        +status_data() StatusBarData
+        +mode_display() &str
+        +render_chat(area) ()
+        +render_approval_overlay(area) ()
+    }
+
+    class UiElement {
+        <<enumeration>>
+        User { text: String }
+        Assistant { text: String }
+        AssistantStream { text: String }
+        Thought { step: usize, content: String }
+        ToolCard { name, params, output, collapsed, line_count }
+        DiffView { path, additions, deletions, lines }
+        ToolResult { name, success, summary }
+        ToolTimeline { tools, total_ms }
+        System { text: String }
+        Error { text: String }
+        +render(width: u16) Vec~Line~
+    }
+
+    class DiffLine {
+        <<enumeration>>
+        Add(String)
+        Del(String)
+        Context(String)
+        Hunk(String)
+    }
+
+    class ApprovalDialog {
+        +dialog_type: ApprovalDialogType
+        +tool_name: String
+        +summary: String
+        +risk_level: String
+        +command: Option~String~
+        +path: Option~String~
+        +url: Option~String~
+        +new_shell(name, command, risk) Self
+        +new_write(name, path, summary) Self
+        +new_network(name, url, summary) Self
+        +render(area: Rect) impl Widget
+    }
+
+    class ApprovalDialogType {
+        <<enumeration>>
+        Shell
+        Write
+        Network
+    }
+
+    class StatusBar {
+        <<utility>>
+        +render(area: Rect, data: StatusBarData) Paragraph
+    }
+
+    class StatusBarData {
+        +mode: String
+        +model: String
+        +input_tokens: u64
+        +output_tokens: u64
+        +elapsed: Duration
+        +git_branch: String
+        +from_app(app: &App) Self
+    }
+
+    class ToolCard {
+        <<utility>>
+        +render(area: Rect, state: ToolCardState, width: u16) Vec~Line~
+        +highlight_code(code: &str, language: &str) Vec~Span~
+        +detect_language(tool_name: &str, file_ext: &str) &str
+    }
+
+    class ToolCardState {
+        +name: String
+        +params_summary: String
+        +output: String
+        +collapsed: bool
+        +output_line_count: usize
+        +new(name, params) Self
+        +set_output(output) ()
+        +toggle() ()
+    }
+
+    class DiffView {
+        <<utility>>
+        +parse_diff(text: &str, max_lines: usize) DiffViewState
+        +render(area: Rect, state: &DiffViewState) Paragraph
+    }
+
+    class DiffViewState {
+        +file_path: String
+        +additions: usize
+        +deletions: usize
+        +lines: Vec~DiffLine~
+        +truncated: bool
+        +omitted_count: usize
+    }
+
+    class Theme {
+        <<constants>>
+        COLOR_DIFF_ADD: Color
+        COLOR_DIFF_DEL: Color
+        COLOR_DIFF_HUNK: Color
+        COLOR_DIFF_CTX: Color
+        COLOR_TOOL_BORDER: Color
+        COLOR_TOOL_NAME: Color
+        COLOR_APPROVAL_BORDER: Color
+        COLOR_RISK_HIGH: Color
+        COLOR_RISK_MEDIUM: Color
+        COLOR_RISK_LOW: Color
+        COLOR_STATUS_BG: Color
+        COLOR_STATUS_FG: Color
+        +style_diff_add() Style
+        +style_diff_del() Style
+        +style_diff_hunk() Style
+        +style_diff_ctx() Style
+    }
+
+    %% ── 关系 ──
+
+    ReActAgent --> AgentEvent : emits
+    ReActAgent --> EventBus : publishes to
+    ReActAgent --> ApprovalEngine : checks
+    ReActAgent --> CancellationToken : polls
+    ReActAgent --> ApprovalResponder : writes tx
+
+    EventBus --> Event : sends
+    Event --> EventType : classified by
+
+    App --> ReActAgent : holds
+    App --> UiElement : manages Vec
+    App --> ApprovalDialog : renders optionally
+    App --> StatusBar : delegates
+    App --> ApprovalResponder : reads tx (sends decision)
+    App --> EventBus : subscribes
+
+    UiElement --> DiffLine : contains (DiffView)
+
+    ApprovalDialog --> ApprovalDialogType : typed by
+
+    ToolCard --> ToolCardState : renders from
+    DiffView --> DiffViewState : renders from
+    DiffViewState --> DiffLine : contains Vec
+
+    StatusBar --> StatusBarData : renders from
+    StatusBarData --> App : constructed from
+
+    Theme ..> ToolCard : imported by
+    Theme ..> DiffView : imported by
+    Theme ..> ApprovalDialog : imported by
+    Theme ..> StatusBar : imported by

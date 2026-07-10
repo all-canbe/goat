@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RGoat — AI Coding Assistant</title>
+<!-- ====================================================================== -->
+<!--  CSS                                                                   -->
+<!-- ====================================================================== -->
+<style>
+/* ---- Reset & Base ---- */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px;background:#1a1a2e;color:#e0e0e0}
+
+#app{display:flex;flex-direction:column;height:100vh}
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#1a1a2e}
+::-webkit-scrollbar-thumb{background:#0f3460;border-radius:3px}
+
+/* ---- Animations ---- */
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+
+/* ---- Title Bar ---- */
+#titlebar{
+  display:flex;align-items:center;gap:12px;padding:6px 16px;
+  background:#16213e;border-bottom:1px solid #0f3460;user-select:none
+}
+#titlebar .logo{font-weight:700;font-size:16px;color:#e94560}
+#titlebar .provider-badge{font-size:11px;padding:2px 8px;background:#0f3460;border-radius:4px;color:#a0d2eb}
+#titlebar .session-info{font-size:11px;color:#666;flex:1;text-align:right}
+#titlebar .status-dot{font-size:12px;color:#555;margin-left:4px}
+#titlebar .status-dot.connected{color:#4ecca3}
+#titlebar .status-dot.processing{color:#e94560;animation:pulse 1s infinite}
+#titlebar .status-dot.error{color:#e94560}
+
+/* ---- Toolbar ---- */
+#toolbar{
+  display:flex;gap:8px;padding:6px 16px;background:#16213e;border-bottom:1px solid #0f3460
+}
+#toolbar select,#toolbar button{
+  padding:4px 12px;border:1px solid #0f3460;border-radius:4px;
+  background:#1a1a2e;color:#e0e0e0;font-size:12px;cursor:pointer
+}
+#toolbar select:hover,#toolbar button:hover{background:#0f3460}
+#toolbar button{white-space:nowrap}
+#toolbar button.danger{color:#e94560;border-color:#e94560}
+#toolbar button.danger:hover{background:#2a0a0a}
+
+/* ---- Messages Container ---- */
+#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+
+/* ---- Message Bubbles ---- */
+.msg{max-width:85%;padding:10px 14px;border-radius:8px;line-height:1.6;word-break:break-word;animation:fadeIn .2s ease}
+.msg.user{align-self:flex-end;background:#0f3460;color:#e0e0e0;border-bottom-right-radius:2px}
+.msg.assistant{align-self:flex-start;background:#1e2a4a;color:#d0d0d0;border-bottom-left-radius:2px}
+.msg.system{align-self:center;color:#555;font-size:11px;padding:4px 12px}
+.msg.error{align-self:center;background:#2a0a0a;color:#e94560;font-size:12px;padding:6px 12px;border-radius:4px;border:1px solid #e94560}
+
+/* ---- Streaming Thought Bubble ---- */
+.msg.streaming{
+  align-self:flex-start;background:#1a1a2e;color:#888;font-size:13px;
+  font-style:italic;padding:8px 14px;border-radius:6px;
+  border:1px dashed #333;max-width:90%
+}
+.msg.streaming .cursor{display:inline;color:#e94560;animation:blink .8s infinite}
+
+/* ---- Tool Call Cards ---- */
+.tool-card{
+  align-self:flex-start;max-width:90%;border-radius:6px;border:1px solid;
+  overflow:hidden;animation:fadeIn .2s ease;min-width:280px
+}
+.tool-card.in-progress{background:#2a1e0a;border-color:#8b6914;color:#f0c040}
+.tool-card.success{background:#0a2a1a;border-color:#2a6b3a;color:#4ecca3}
+.tool-card.error{background:#2a0a0a;border-color:#6b2a2a;color:#e94560}
+
+.tool-card-header{
+  display:flex;align-items:center;gap:8px;padding:6px 10px;
+  cursor:pointer;user-select:none;font-size:12px;font-weight:600
+}
+.tool-card-header .tool-icon{font-size:13px;width:18px;text-align:center}
+.tool-card-header .tool-name{flex:1}
+.tool-card-header .tool-expand{color:inherit;opacity:.5;font-size:11px;transition:transform .2s}
+.tool-card-header .tool-expand.open{transform:rotate(90deg)}
+
+.tool-card-body{display:none;font-size:12px;border-top:1px solid inherit;padding:8px 10px}
+.tool-card-body.open{display:block}
+.tool-card-section{margin-bottom:6px}
+.tool-card-section .label{font-size:10px;text-transform:uppercase;opacity:.6;margin-bottom:2px}
+.tool-card-section pre{
+  background:rgba(0,0,0,.3);padding:8px;border-radius:4px;overflow-x:auto;
+  white-space:pre-wrap;font-family:'Consolas','Monaco',monospace;font-size:11px;
+  margin:0;color:inherit
+}
+
+/* ---- Approval Modal ---- */
+#approval-overlay{
+  display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+  background:rgba(0,0,0,.7);z-index:1000;
+  justify-content:center;align-items:center
+}
+#approval-overlay.active{display:flex}
+#approval-dialog{
+  background:#16213e;border:2px solid #c080f0;border-radius:12px;
+  padding:24px;max-width:480px;width:90%;animation:fadeIn .2s ease
+}
+#approval-dialog h3{color:#c080f0;font-size:16px;margin-bottom:12px}
+#approval-dialog .approval-field{margin-bottom:10px}
+#approval-dialog .approval-field .label{
+  display:block;font-size:10px;text-transform:uppercase;color:#888;margin-bottom:2px
+}
+#approval-dialog .approval-field .value{font-size:13px;color:#d0d0d0}
+#approval-dialog .approval-field pre{
+  background:#1a1a2e;padding:8px;border-radius:4px;font-family:'Consolas','Monaco',monospace;
+  font-size:11px;overflow-x:auto;white-space:pre-wrap;color:#a0d2eb;max-height:120px;overflow-y:auto
+}
+#approval-dialog .approval-field .risk{font-weight:700;text-transform:uppercase}
+#approval-dialog .approval-field .risk.low{color:#4ecca3}
+#approval-dialog .approval-field .risk.medium{color:#f0c040}
+#approval-dialog .approval-field .risk.high{color:#e94560}
+#approval-buttons{display:flex;gap:12px;margin-top:16px;justify-content:flex-end}
+#approval-buttons button{padding:8px 20px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
+#approval-buttons .btn-deny{background:#333;color:#e0e0e0}
+#approval-buttons .btn-approve{background:#4ecca3;color:#1a1a2e}
+#approval-buttons button:hover{opacity:.85}
+.approval-hint{font-size:11px;color:#666;text-align:center;margin-top:8px}
+
+/* ---- Markdown Rendering ---- */
+.msg-body p{margin:4px 0}
+.msg-body p:first-child{margin-top:0}
+.msg-body p:last-child{margin-bottom:0}
+.msg-body strong{color:#f0c040}
+.msg-body em{color:#a0d2eb}
+.msg-body code{
+  background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px;
+  font-family:'Consolas','Monaco',monospace;font-size:12px;color:#4ecca3
+}
+.msg-body pre{
+  background:#0d1117;border:1px solid #21262d;border-radius:6px;
+  padding:12px;margin:8px 0;overflow-x:auto;
+  position:relative
+}
+.msg-body pre code{background:transparent;padding:0;color:#c9d1d9;display:block}
+.msg-body .copy-btn{
+  position:absolute;top:6px;right:8px;font-size:10px;
+  background:#21262d;color:#8b949e;border:1px solid #30363d;
+  border-radius:4px;padding:2px 8px;cursor:pointer;
+  opacity:0;transition:opacity .15s
+}
+.msg-body pre:hover .copy-btn{opacity:1}
+.msg-body .copy-btn:hover{color:#e0e0e0;background:#30363d}
+.msg-body .copy-btn.copied{color:#4ecca3}
+.msg-body ul,.msg-body ol{padding-left:20px;margin:4px 0}
+.msg-body li{margin:2px 0}
+.msg-body blockquote{
+  border-left:3px solid #e94560;padding-left:12px;
+  color:#888;margin:8px 0
+}
+.msg-body h1,.msg-body h2,.msg-body h3{color:#a0d2eb;margin:8px 0 4px}
+.msg-body h1{font-size:16px}.msg-body h2{font-size:15px}.msg-body h3{font-size:14px}
+.msg-body hr{border:none;border-top:1px solid #2a2a4a;margin:8px 0}
+.msg-body a{color:#4ecca3}
+.msg-body table{border-collapse:collapse;width:100%;margin:8px 0}
+.msg-body th,.msg-body td{border:1px solid #2a2a4a;padding:4px 8px;text-align:left;font-size:12px}
+.msg-body th{background:#1e2a4a}
+
+/* ---- User message markdown overrides ---- */
+.msg.user .msg-body strong{color:#f0c040}
+.msg.user .msg-body code{background:rgba(0,0,0,.3);color:#4ecca3}
+.msg.user .msg-body pre{background:rgba(0,0,0,.3);border-color:rgba(255,255,255,.1)}
+
+/* ---- Input Area ---- */
+#input-area{display:flex;gap:8px;padding:10px 16px;background:#16213e;border-top:1px solid #0f3460}
+#promptInput{
+  flex:1;padding:8px 12px;border:1px solid #0f3460;border-radius:6px;
+  background:#1a1a2e;color:#e0e0e0;font-family:inherit;font-size:14px;
+  resize:none;outline:none;min-height:38px;max-height:200px;
+  overflow-y:auto;line-height:1.4
+}
+#promptInput:focus{border-color:#e94560}
+#btnSend{
+  padding:8px 20px;border:none;border-radius:6px;
+  background:#e94560;color:#fff;font-weight:600;font-size:14px;cursor:pointer;align-self:flex-end
+}
+#btnSend:hover{background:#c73652}
+#btnSend:disabled{background:#444;cursor:not-allowed}
+
+/* ---- Setup Screen ---- */
+#setup-screen{display:flex;justify-content:center;align-items:center;height:100vh;background:#1a1a2e}
+#setup-screen.hidden,#app.hidden{display:none}
+.setup-card{
+  background:#16213e;padding:40px;border-radius:12px;
+  border:1px solid #0f3460;max-width:440px;width:90%
+}
+.setup-card h1{font-size:22px;margin-bottom:8px;color:#e0e0e0}
+.setup-card p{font-size:13px;color:#888;margin-bottom:24px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:12px;color:#a0d2eb;margin-bottom:4px}
+.form-group input{
+  width:100%;padding:10px 12px;border:1px solid #0f3460;border-radius:6px;
+  background:#1a1a2e;color:#e0e0e0;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box
+}
+.form-group input:focus{border-color:#e94560}
+.form-group .hint{display:block;font-size:11px;color:#4ecca3;margin-top:4px}
+.btn-primary{
+  width:100%;padding:12px;border:none;border-radius:6px;
+  background:#e94560;color:#fff;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px
+}
+.btn-primary:hover{background:#c73652}
+.error-msg{color:#e94560;font-size:12px;margin-top:8px;display:none}
+.error-msg.visible{display:block}
+</style>
+</head>
+<body>
+
+<!-- ====================================================================== -->
+<!--  SETUP SCREEN (shown when no provider)                                 -->
+<!-- ====================================================================== -->
+<div id="setup-screen" class="hidden">
+  <div class="setup-card">
+    <h1>🐐 Welcome to RGoat</h1>
+    <p>Configure your LLM provider to get started.</p>
+    <div class="form-group"><label>Base URL</label><input type="text" id="setupUrl" placeholder="https://api.deepseek.com/v1"><span class="hint" id="typeHint"></span></div>
+    <div class="form-group"><label>API Key</label><input type="password" id="setupKey" placeholder="sk-..."></div>
+    <div class="form-group"><label>Model Name</label><input type="text" id="setupModel" placeholder="deepseek-chat"></div>
+    <div class="form-group"><label>Provider Name</label><input type="text" id="setupName" placeholder="my-provider"></div>
+    <button id="btnSetup" class="btn-primary">Save &amp; Start</button>
+    <p id="setupError" class="error-msg"></p>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!--  APPROVAL MODAL                                                        -->
+<!-- ====================================================================== -->
+<div id="approval-overlay">
+  <div id="approval-dialog">
+    <h3>🛡 Runtime Approval Required</h3>
+    <div class="approval-field"><span class="label">Tool</span><span class="value" id="approval-tool">-</span></div>
+    <div class="approval-field"><span class="label">Risk Level</span><span class="value"><span class="risk" id="approval-risk">-</span></span></div>
+    <div class="approval-field"><span class="label">Message</span><div class="value" id="approval-message">-</div></div>
+    <div class="approval-field"><span class="label">Arguments</span><pre id="approval-args">-</pre></div>
+    <div id="approval-buttons">
+      <button class="btn-deny" id="btnDeny">Deny (N)</button>
+      <button class="btn-approve" id="btnApprove">Approve (Y)</button>
+    </div>
+    <p class="approval-hint">Approval response not yet implemented — action logged only</p>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!--  MAIN APP                                                              -->
+<!-- ====================================================================== -->
+<div id="app" class="hidden">
+  <!-- Title Bar -->
+  <header id="titlebar">
+    <span class="logo">🐐 RGoat</span>
+    <span class="provider-badge" id="providerBadge">—</span>
+    <span class="session-info" id="sessionInfo"></span>
+    <span class="status-dot" id="statusDot" title="Connecting...">●</span>
+  </header>
+
+  <!-- Toolbar -->
+  <nav id="toolbar">
+    <select id="providerSelect"><option value="">Loading...</option></select>
+    <select id="modeSelect">
+      <option value="agent">Agent</option>
+      <option value="plan">Plan</option>
+      <option value="flow">Flow</option>
+      <option value="yolo">YOLO</option>
+    </select>
+    <button id="btnClear">Clear</button>
+    <button id="btnNewSession">+ New</button>
+  </nav>
+
+  <!-- Messages -->
+  <main id="messages"></main>
+
+  <!-- Input -->
+  <footer id="input-area">
+    <textarea id="promptInput" placeholder="Ask anything... (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+    <button id="btnSend">Send</button>
+  </footer>
+</div>
+
+<!-- ====================================================================== -->
+<!--  JAVASCRIPT                                                            -->
+<!-- ====================================================================== -->
+<script>
+(function(){"use strict";
+
+// =========================================================================
+// Tauri API Guard
+// =========================================================================
+const __TAURI__ = window.__TAURI__;
+if (!__TAURI__) {
+  document.body.innerHTML =
+    '<div style="color:#e94560;padding:40px;text-align:center;font-family:sans-serif;background:#1a1a2e;height:100vh">' +
+    '<h2>❌ Tauri API Not Loaded</h2>' +
+    '<p style="color:#888;margin-top:12px">Please ensure the app is running inside a Tauri v2 WebView.</p>' +
+    '<p style="color:#666;font-size:12px;margin-top:8px">window.__TAURI__ is undefined</p>' +
+    '</div>';
+  throw new Error('Tauri API not available');
+}
+const invoke = __TAURI__.core.invoke;
+const listen = __TAURI__.event.listen;
+
+// =========================================================================
+// DOM Refs
+// =========================================================================
+const $ = id => document.getElementById(id);
+const messagesEl  = $('messages');
+const promptInput = $('promptInput');
+const btnSend     = $('btnSend');
+const providerBadge  = $('providerBadge');
+const providerSelect = $('providerSelect');
+const modeSelect     = $('modeSelect');
+const sessionInfo    = $('sessionInfo');
+const statusDot      = $('statusDot');
+
+// =========================================================================
+// State
+// =========================================================================
+let currentSessionId = null;
+let isProcessing = false;
+let streamingEl  = null;      // The .msg.streaming DOM element (for thought accumulation)
+let streamingContent = '';    // Raw accumulated text
+let toolCallCards = {};       // step -> { el, headerEl, bodyEl, iconEl, expandEl }
+
+// =========================================================================
+// Status / UI Helpers
+// =========================================================================
+function setStatus(s) {
+  isProcessing = (s === 'processing');
+  statusDot.className = 'status-dot ' + s;
+  btnSend.disabled = isProcessing;
+  promptInput.disabled = isProcessing;
+  if (isProcessing) {
+    statusDot.title = 'Processing...';
+  } else {
+    statusDot.title = s === 'error' ? 'Error' : (s === 'idle' ? 'Ready' : 'Connecting...');
+  }
+}
+
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// =========================================================================
+// Inline Markdown → HTML Renderer (P1)
+// =========================================================================
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = text;
+
+  // Escape HTML first (except what we'll re-introduce)
+  html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Fenced code blocks ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+    const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return '<pre><button class="copy-btn" onclick="copyCode(this)">Copy</button><code>' + escaped + '</code></pre>';
+  });
+
+  // Inline code `...`
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold **...** or __...__
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+
+  // Italic *...* or _..._
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Horizontal rule
+  html = html.replace(/^---$/gm, '<hr>');
+
+  // Blockquote
+  html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // Unordered lists (multi-line)
+  html = html.replace(/((?:^- .+\n?)+)/gm, function(match) {
+    const items = match.trim().split('\n').map(function(line) {
+      return '<li>' + line.replace(/^- /, '') + '</li>';
+    }).join('');
+    return '<ul>' + items + '</ul>';
+  });
+
+  // Ordered lists (multi-line)
+  html = html.replace(/((?:^\d+\. .+\n?)+)/gm, function(match) {
+    const items = match.trim().split('\n').map(function(line) {
+      return '<li>' + line.replace(/^\d+\. /, '') + '</li>';
+    }).join('');
+    return '<ol>' + items + '</ol>';
+  });
+
+  // Links [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+  // Paragraphs: split by double newline
+  const blocks = html.split(/\n\n+/);
+  html = blocks.map(function(block) {
+    block = block.trim();
+    if (!block) return '';
+    // Don't wrap elements that are already block-level
+    if (/^<(pre|ul|ol|h[1-3]|blockquote|hr|table)/.test(block)) return block;
+    // Single newlines become <br>
+    return '<p>' + block.replace(/\n/g, '<br>') + '</p>';
+  }).join('');
+
+  // Clean up: merge adjacent lists
+  html = html.replace(/<\/ul>\s*<ul>/g, '');
+  html = html.replace(/<\/ol>\s*<ol>/g, '');
+
+  return html;
+}
+
+// Global copy handler for code blocks
+window.copyCode = function(btn) {
+  const pre = btn.parentElement;
+  const code = pre.querySelector('code');
+  const text = code ? code.textContent : '';
+  navigator.clipboard.writeText(text).then(function() {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  }).catch(function() {
+    btn.textContent = 'Failed';
+    setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+  });
+};
+
+// =========================================================================
+// Message Helpers
+// =========================================================================
+function makeMsgEl(role, content) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  if (content) {
+    const body = document.createElement('div');
+    body.className = 'msg-body';
+    body.innerHTML = renderMarkdown(content);
+    el.appendChild(body);
+  }
+  return el;
+}
+
+function addMessage(role, content) {
+  clearStreaming(); // Finalise any lingering streaming bubble
+  const el = makeMsgEl(role, content);
+  messagesEl.appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+// =========================================================================
+// Streaming Thought Accumulation (P1)
+// =========================================================================
+function clearStreaming() {
+  if (streamingEl && streamingEl.parentNode) {
+    // Remove cursor before finalising
+    const cursor = streamingEl.querySelector('.cursor');
+    if (cursor) cursor.remove();
+    streamingEl.classList.remove('streaming');
+  }
+  streamingEl = null;
+  streamingContent = '';
+}
+
+function appendThought(content) {
+  if (!streamingEl) {
+    // Create new streaming bubble
+    clearStreaming(); // safety
+    streamingEl = document.createElement('div');
+    streamingEl.className = 'msg streaming';
+    const body = document.createElement('div');
+    body.className = 'msg-body';
+    streamingEl.appendChild(body);
+    messagesEl.appendChild(streamingEl);
+  }
+  streamingContent += content;
+  const body = streamingEl.querySelector('.msg-body');
+  body.innerHTML = renderMarkdown(streamingContent) + '<span class="cursor">▌</span>';
+  scrollToBottom();
+}
+
+function finalizeStreaming() {
+  if (!streamingEl) return;
+  const cursor = streamingEl.querySelector('.cursor');
+  if (cursor) cursor.remove();
+  streamingEl.classList.remove('streaming');
+  streamingEl.className = 'msg assistant'; // promote to full assistant message
+  streamingEl = null;
+  streamingContent = '';
+}
+
+// =========================================================================
+// Tool Call Cards (P2)
+// =========================================================================
+function createToolCard(step, toolName, status) {
+  const card = document.createElement('div');
+  card.className = 'tool-card ' + status;
+  card.dataset.step = step;
+  card.dataset.tool = toolName;
+  card.dataset.status = status;
+
+  // Status icon
+  const iconMap = { 'in-progress': '⏳', 'success': '✓', 'error': '✗' };
+  const icon = iconMap[status] || '●';
+
+  card.innerHTML =
+    '<div class="tool-card-header">' +
+      '<span class="tool-icon">' + icon + '</span>' +
+      '<span class="tool-name">' + toolName + '</span>' +
+      '<span class="tool-expand"></span>' +
+    '</div>' +
+    '<div class="tool-card-body"></div>';
+
+  const headerEl = card.querySelector('.tool-card-header');
+  const bodyEl  = card.querySelector('.tool-card-body');
+  const iconEl  = card.querySelector('.tool-icon');
+  const expandEl = card.querySelector('.tool-expand');
+
+  // Expand/collapse on click
+  headerEl.addEventListener('click', function() {
+    bodyEl.classList.toggle('open');
+    expandEl.classList.toggle('open');
+    if (bodyEl.classList.contains('open')) {
+      expandEl.textContent = '▼';
+    } else {
+      expandEl.textContent = '';
+    }
+  });
+
+  messagesEl.appendChild(card);
+  scrollToBottom();
+
+  const entry = { el: card, headerEl, bodyEl, iconEl, expandEl };
+  toolCallCards[step] = entry;
+  return entry;
+}
+
+function updateToolCard(step, updates) {
+  const card = toolCallCards[step];
+  if (!card) return;
+
+  if (updates.args) {
+    // Show arguments section
+    let section = card.bodyEl.querySelector('.args-section');
+    if (!section) {
+      section = document.createElement('div');
+      section.className = 'tool-card-section args-section';
+      section.innerHTML = '<div class="label">Arguments</div><pre></pre>';
+      card.bodyEl.appendChild(section);
+    }
+    const pre = section.querySelector('pre');
+    pre.textContent = typeof updates.args === 'string' ? updates.args : JSON.stringify(updates.args, null, 2);
+  }
+
+  if (updates.output !== undefined) {
+    let section = card.bodyEl.querySelector('.output-section');
+    if (!section) {
+      section = document.createElement('div');
+      section.className = 'tool-card-section output-section';
+      section.innerHTML = '<div class="label">Result</div><pre></pre>';
+      card.bodyEl.appendChild(section);
+    }
+    const pre = section.querySelector('pre');
+    pre.textContent = typeof updates.output === 'string' ? updates.output : JSON.stringify(updates.output, null, 2);
+  }
+
+  if (updates.status) {
+    const status = updates.status;
+    card.el.className = 'tool-card ' + status;
+    card.el.dataset.status = status;
+    const iconMap = { 'in-progress': '⏳', 'success': '✓', 'error': '✗' };
+    card.iconEl.textContent = iconMap[status] || '●';
+  }
+
+  if (updates.success !== undefined) {
+    updateToolCard(step, { status: updates.success ? 'success' : 'error' });
+  }
+
+  scrollToBottom();
+}
+
+// =========================================================================
+// Approval Dialog (P1)
+// =========================================================================
+let approvalResolve = null;
+
+function showApproval(payload) {
+  const overlay = $('approval-overlay');
+  overlay.classList.add('active');
+
+  $('approval-tool').textContent = payload.tool_name || 'unknown';
+  $('approval-message').textContent = payload.message || '(no message)';
+
+  // Risk level
+  const risk = (payload.risk_level || 'medium').toLowerCase();
+  const riskEl = $('approval-risk');
+  riskEl.textContent = risk;
+  riskEl.className = 'risk ' + risk;
+
+  // Arguments
+  const argsPre = $('approval-args');
+  if (payload.arguments) {
+    argsPre.textContent = typeof payload.arguments === 'string'
+      ? payload.arguments
+      : JSON.stringify(payload.arguments, null, 2);
+  } else {
+    argsPre.textContent = '(none)';
+  }
+
+  // Focus trap
+  $('btnApprove').focus();
+
+  return new Promise(function(resolve) {
+    approvalResolve = resolve;
+  });
+}
+
+function closeApproval(decision) {
+  $('approval-overlay').classList.remove('active');
+  if (approvalResolve) {
+    approvalResolve(decision);
+    approvalResolve = null;
+  }
+}
+
+$('btnApprove').addEventListener('click', function() { closeApproval('approve'); });
+$('btnDeny').addEventListener('click', function() { closeApproval('deny'); });
+
+// Keyboard shortcuts for approval
+document.addEventListener('keydown', function(e) {
+  if (!$('approval-overlay').classList.contains('active')) return;
+  if (e.key === 'y' || e.key === 'Y') {
+    e.preventDefault();
+    closeApproval('approve');
+  } else if (e.key === 'n' || e.key === 'N') {
+    e.preventDefault();
+    closeApproval('deny');
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeApproval('deny');
+  }
+});
+
+// =========================================================================
+// Event Handling (P0)
+// =========================================================================
+function handleAgentEvent(payload) {
+  // payload is the FLAT event object — use it directly
+  if (!payload || !payload.type) {
+    console.warn('[RGoat] Unknown event payload:', payload);
+    return;
+  }
+
+  const ae = payload; // No more nested .data parsing!
+
+  switch (ae.type) {
+    case 'started':
+      setStatus('processing');
+      // Clear any streaming thought from a previous run
+      clearStreaming();
+      // Clear old tool cards
+      toolCallCards = {};
+      break;
+
+    case 'thought':
+      if (ae.content) {
+        appendThought(ae.content);
+      }
+      break;
+
+    case 'tool_call':
+      createToolCard(ae.step || 0, ae.tool_name || 'unknown', 'in-progress');
+      if (ae.arguments) {
+        updateToolCard(ae.step || 0, { args: ae.arguments });
+      }
+      break;
+
+    case 'tool_result':
+      updateToolCard(ae.step || 0, {
+        success: ae.success,
+        output: ae.output
+      });
+      break;
+
+    case 'approval':
+      // Finalize any streaming first
+      finalizeStreaming();
+      showApproval(ae).then(function(decision) {
+        addMessage('system', 'Approval "' + decision + '" for ' + (ae.tool_name || 'unknown') + ' (response not yet implemented)');
+      });
+      break;
+
+    case 'message':
+      // Finalize streaming thought → promote to assistant message
+      finalizeStreaming();
+      if (ae.content) {
+        const el = makeMsgEl('assistant', ae.content);
+        messagesEl.appendChild(el);
+        scrollToBottom();
+      }
+      break;
+
+    case 'finished':
+      finalizeStreaming();
+      if (ae.answer) {
+        const el = makeMsgEl('assistant', ae.answer);
+        messagesEl.appendChild(el);
+        scrollToBottom();
+      }
+      setStatus('idle');
+      break;
+
+    case 'error':
+      finalizeStreaming();
+      addMessage('error', ae.message || 'Unknown error');
+      setStatus('error');
+      // Auto-recover status after delay
+      setTimeout(function() { if (!isProcessing) setStatus('idle'); }, 3000);
+      break;
+
+    default:
+      console.log('[RGoat] Unhandled event type:', ae.type, ae);
+  }
+}
+
+async function setupEventListener() {
+  try {
+    await listen('agent-event', function(e) {
+      handleAgentEvent(e.payload);
+    });
+    setStatus('idle'); // connected
+  } catch (e) {
+    console.warn('[RGoat] Event listen failed:', e);
+    setStatus('error');
+  }
+}
+
+// =========================================================================
+// Send Prompt
+// =========================================================================
+async function sendPrompt() {
+  const prompt = promptInput.value.trim();
+  if (!prompt || isProcessing) return;
+
+  // Show user message
+  addMessage('user', prompt);
+  promptInput.value = '';
+  autoResizeTextarea();
+
+  try {
+    const result = await invoke('send_prompt', {
+      request: {
+        prompt: prompt,
+        sessionId: currentSessionId,
+        mode: modeSelect.value
+      }
+    });
+    currentSessionId = result.session_id;
+    if (currentSessionId) {
+      sessionInfo.textContent = 'session: ' + currentSessionId.slice(0, 8);
+    }
+    setStatus('processing');
+  } catch (e) {
+    addMessage('error', String(e));
+    setStatus('error');
+    setTimeout(function() { if (!isProcessing) setStatus('idle'); }, 3000);
+  }
+}
+
+btnSend.addEventListener('click', sendPrompt);
+promptInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendPrompt();
+  }
+});
+
+// =========================================================================
+// Auto-resize Textarea
+// =========================================================================
+function autoResizeTextarea() {
+  promptInput.style.height = 'auto';
+  promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
+}
+promptInput.addEventListener('input', autoResizeTextarea);
+
+// =========================================================================
+// Toolbar: Clear & New Session
+// =========================================================================
+$('btnClear').addEventListener('click', function() {
+  messagesEl.innerHTML = '';
+  clearStreaming();
+  toolCallCards = {};
+});
+
+$('btnNewSession').addEventListener('click', function() {
+  currentSessionId = null;
+  messagesEl.innerHTML = '';
+  sessionInfo.textContent = '';
+  clearStreaming();
+  toolCallCards = {};
+  addMessage('system', 'New session started.');
+});
+
+// =========================================================================
+// Provider Switching
+// =========================================================================
+async function refreshProviders() {
+  try {
+    const providers = await invoke('list_providers');
+    providerSelect.innerHTML = '';
+    providers.forEach(function(p) {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = (p.is_current ? '✓ ' : '') + p.name + ' (' + p.model + ')';
+      providerSelect.appendChild(opt);
+    });
+  } catch (e) {
+    console.error('[RGoat] list_providers failed:', e);
+  }
+}
+
+async function refreshCurrentProvider() {
+  try {
+    const name = await invoke('get_current_provider');
+    providerBadge.textContent = name || 'no provider';
+  } catch (e) {
+    providerBadge.textContent = 'error';
+  }
+}
+
+providerSelect.addEventListener('change', async function() {
+  const name = providerSelect.value;
+  if (!name) return;
+  try {
+    await invoke('switch_provider', { name: name });
+    await refreshProviders();
+    await refreshCurrentProvider();
+    addMessage('system', 'Switched to: ' + name);
+  } catch (e) {
+    addMessage('error', String(e));
+  }
+});
+
+// =========================================================================
+// Setup Screen
+// =========================================================================
+function showSetup() {
+  $('setup-screen').classList.remove('hidden');
+  $('app').classList.add('hidden');
+
+  const urlInput  = $('setupUrl');
+  const typeHint  = $('typeHint');
+  const modelInput = $('setupModel');
+  const nameInput  = $('setupName');
+
+  urlInput.addEventListener('input', function() {
+    const u = urlInput.value.toLowerCase();
+    const isAnthropic = u.includes('anthropic');
+    typeHint.textContent = isAnthropic ? 'Detected: Anthropic API' : 'Detected: OpenAI Compatible API';
+    if (!modelInput.value) modelInput.value = isAnthropic ? 'claude-sonnet-4-20250514' : 'deepseek-chat';
+    if (!nameInput.value) {
+      if (isAnthropic) nameInput.value = 'anthropic';
+      else if (u.includes('deepseek')) nameInput.value = 'deepseek';
+      else if (u.includes('openai')) nameInput.value = 'openai';
+      else if (u.includes('bigmodel')) nameInput.value = 'zhipu';
+      else nameInput.value = 'custom';
+    }
+  });
+
+  $('btnSetup').addEventListener('click', async function() {
+    const url   = urlInput.value.trim();
+    const key   = $('setupKey').value.trim();
+    const model = modelInput.value.trim() || 'deepseek-chat';
+    const name  = nameInput.value.trim() || 'custom';
+    const errEl = $('setupError');
+
+    if (!url || !key) {
+      errEl.textContent = 'Base URL and API Key are required.';
+      errEl.classList.add('visible');
+      return;
+    }
+
+    try {
+      await invoke('configure_provider', {
+        baseUrl: url,
+        apiKey: key,
+        model: model,
+        name: name
+      });
+      errEl.classList.remove('visible');
+      showApp();
+      await refreshProviders();
+      await refreshCurrentProvider();
+      setStatus('idle');
+      addMessage('system', 'Provider configured! Start chatting.');
+    } catch (e) {
+      errEl.textContent = String(e);
+      errEl.classList.add('visible');
+    }
+  });
+}
+
+function showApp() {
+  $('setup-screen').classList.add('hidden');
+  $('app').classList.remove('hidden');
+}
+
+// =========================================================================
+// Init
+// =========================================================================
+(async function init() {
+  let hasProvider = false;
+  try {
+    hasProvider = await invoke('has_configured_provider');
+  } catch (e) {
+    console.warn('[RGoat] has_configured_provider check failed:', e);
+  }
+
+  if (!hasProvider) {
+    showSetup();
+    return;
+  }
+
+  showApp();
+  await refreshProviders();
+  await refreshCurrentProvider();
+  setStatus('idle');
+  addMessage('system', 'Welcome to RGoat Desktop! Agent ready.');
+})();
+
+// Listen for events (always — even on setup screen in case events arrive)
+setupEventListener();
+
+})();
+</script>
+</body>
+</html>
