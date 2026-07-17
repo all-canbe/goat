@@ -186,7 +186,7 @@ export default function CommandPalette({
       className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-black/50"
       onClick={handleOverlayClick}
     >
-      <div className="bg-surface border border-border rounded-lg shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+      <div className="bg-surface border border-border rounded-xl shadow-lg w-full max-w-lg mx-4 overflow-hidden">
         {/* Search input */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
           <Search size={16} className="text-text-secondary shrink-0" />
@@ -240,15 +240,15 @@ export default function CommandPalette({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-[10px] text-text-secondary">
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-2xs text-text-secondary">
           <span>
-            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-[9px]">↑↓</kbd> Navigate
+            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-2xs">↑↓</kbd> Navigate
           </span>
           <span>
-            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-[9px]">Enter</kbd> Select
+            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-2xs">Enter</kbd> Select
           </span>
           <span>
-            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-[9px]">Esc</kbd> Close
+            <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-2xs">Esc</kbd> Close
           </span>
         </div>
       </div>
