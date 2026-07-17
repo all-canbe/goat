@@ -61,7 +61,7 @@ export default function MessageList() {
                 <button
                   key={text}
                   onClick={() => setDraft(text)}
-                  className="flex items-center gap-2 px-3 py-2.5 rounded-md bg-surface border border-border text-left text-xs text-text hover:border-primary/50 hover:bg-surface-hover hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring transition-colors"
+                  className="flex items-center gap-2 px-3 py-2.5 rounded-md bg-surface border border-border text-left text-xs text-text hover:border-primary/50 hover:bg-surface-hover hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring transition"
                 >
                   <Icon size={14} className="text-brand shrink-0" />
                   <span className="truncate">{text}</span>
@@ -79,10 +79,12 @@ export default function MessageList() {
       {messages.map((msg, index) => {
         const prevMsg = messages[index - 1];
         const showDivider = prevMsg && isAgentMessage(prevMsg.type) && isAgentMessage(msg.type);
-        return (
-          <div key={msg.id} className={showDivider ? "border-t border-divider" : undefined}>
+        return showDivider ? (
+          <div key={msg.id} className="border-t border-divider">
             <MessageBubble message={msg} />
           </div>
+        ) : (
+          <MessageBubble key={msg.id} message={msg} />
         );
       })}
 
