@@ -20,6 +20,7 @@ interface UseGlobalShortcutsOptions {
  * 集中管理全局快捷键：
  * - Cmd/Ctrl+K → 切换 CommandPalette
  * - Cmd/Ctrl+N → 新建会话
+ * - Cmd/Ctrl+Shift+N → 新建标签页/线程（当前复用新建会话）
  * - Cmd/Ctrl+B → 切换 Sidebar 折叠
  * - Cmd/Ctrl+J → 切换右侧面板
  * - Cmd/Ctrl+/ → 聚焦输入框
