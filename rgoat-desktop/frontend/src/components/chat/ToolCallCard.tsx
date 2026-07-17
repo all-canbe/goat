@@ -58,10 +58,10 @@ export default function ToolCallCard({
   const isSuccess = success === true;
 
   const statusColor = isPending
-    ? "border-warning/40 bg-warning/5"
+    ? "border-warning/40 bg-warning-subtle border-l-2 border-l-warning"
     : isSuccess
-      ? "border-success/40 bg-success/5"
-      : "border-error/40 bg-error/5";
+      ? "border-success/40 bg-success-subtle border-l-2 border-l-success"
+      : "border-error/40 bg-error-subtle border-l-2 border-l-error";
 
   const statusIcon = isPending ? (
     <Loader2 size={14} className="text-warning animate-spin shrink-0" />
