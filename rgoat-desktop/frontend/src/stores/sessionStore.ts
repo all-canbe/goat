@@ -95,8 +95,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: [newSession, ...s.sessions],
         activeSessionId: newSession.id,
       }));
-    } catch {
-      // silently fail
+    } catch (err) {
+      // 抛出错误让调用方处理 UX 反馈（不再 silently fail）
+      throw err;
     }
   },
 }));

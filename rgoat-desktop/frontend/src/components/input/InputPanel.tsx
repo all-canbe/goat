@@ -154,10 +154,14 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
           addSystemMessage("⚠️ 当前没有活动会话，无法 Fork。");
           return true;
         }
-        addUserMessage(raw); // 显示用户输入的 slash 命令
-        await forkSession(activeSessionId);
-        clearMessages();
-        addToast("会话已 Fork 并切换", "success");
+        try {
+          await forkSession(activeSessionId);
+          clearMessages();
+          addToast("会话已 Fork 并切换", "success");
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          addToast(`Fork 失败：${errorMsg}`, "error");
+        }
         return true;
       }
       // 检查是否匹配某个 skill

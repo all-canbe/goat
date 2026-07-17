@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useToastStore } from "../../stores/toastStore";
 import type { Session } from "../../stores/sessionStore";
 
 interface SidebarProps {
@@ -36,6 +37,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     forkSession,
   } = useSessionStore();
   const { clearMessages } = useChatStore();
+  const { addToast } = useToastStore();
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -85,10 +87,16 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     setContextMenu({ x: e.clientX, y: e.clientY, sessionId: session.id });
   }
 
-  function handleForkFromMenu() {
+  async function handleForkFromMenu() {
     if (!contextMenu) return;
-    forkSession(contextMenu.sessionId);
-    clearMessages();
+    try {
+      await forkSession(contextMenu.sessionId);
+      clearMessages();
+      addToast("会话已 Fork 并切换", "success");
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      addToast(`Fork 失败：${errorMsg}`, "error");
+    }
     setContextMenu(null);
   }
 
@@ -328,8 +336,16 @@ export default function Sidebar({ collapsed }: SidebarProps) {
             }}
           />
           <div
-            className="fixed z-50 bg-surface border border-border rounded-md shadow-lg py-1 min-w-[160px]"
+            className="fixed z-50 bg-surface border border-border rounded-md shadow-lg py-1 min-w-[160px] outline-none"
             style={{ left: contextMenu.x, top: contextMenu.y }}
+            tabIndex={-1}
+            ref={(el) => el?.focus()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setContextMenu(null);
+              }
+            }}
           >
             <button
               onClick={handleForkFromMenu}
