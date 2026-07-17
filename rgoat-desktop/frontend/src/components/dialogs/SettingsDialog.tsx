@@ -149,7 +149,7 @@ export default function SettingsDialog({
                   onClick={() => handleModeChange(m)}
                   className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
                     selectedMode === m
-                      ? "bg-primary text-white"
+                      ? "bg-primary-subtle text-brand"
                       : "text-text-secondary hover:text-text"
                   }`}
                 >
@@ -176,7 +176,7 @@ export default function SettingsDialog({
                   onClick={() => setTheme(key)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
                     theme === key
-                      ? "bg-primary text-white"
+                      ? "bg-primary-subtle text-brand"
                       : "text-text-secondary hover:text-text"
                   }`}
                 >
