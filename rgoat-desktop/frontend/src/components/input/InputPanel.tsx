@@ -31,6 +31,7 @@ const BUILTIN_SLASH: SlashItem[] = [
   { name: "clear", description: "清空当前会话消息", kind: "builtin" },
   { name: "skills", description: "列出所有可用 Skill", kind: "builtin" },
   { name: "model", description: "切换 LLM Provider/模型", kind: "builtin" },
+  { name: "fork", description: "Fork 当前会话（复制并切换到新会话）", kind: "builtin" },
 ];
 
 const HELP_TEXT = `可用 Slash 命令：
@@ -38,6 +39,7 @@ const HELP_TEXT = `可用 Slash 命令：
 /clear   — 清空当前会话消息
 /skills  — 列出所有可用 Skill
 /model   — 切换 LLM Provider/模型
+/fork    — Fork 当前会话
 /<skill-name> — 加载指定 Skill 并发送给 Agent 执行
 
 可用模式：Agent / Plan / Flow / YOLO`;
@@ -51,7 +53,7 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const { currentProvider, loadProviders } = useConfigStore();
-  const { activeSessionId, setActiveSessionId } = useSessionStore();
+  const { activeSessionId, setActiveSessionId, forkSession } = useSessionStore();
   const { isStreaming, setStreaming, addUserMessage, addSystemMessage, clearMessages, cancelAgent, draft, setDraft, focusInputTrigger } = useChatStore();
   const { skills, loadSkills, readSkill } = useSkillStore();
   const { addToast } = useToastStore();
@@ -147,6 +149,17 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
         window.dispatchEvent(new CustomEvent("rgoat:open-model-palette"));
         return true;
       }
+      if (cmd === "fork") {
+        if (!activeSessionId) {
+          addSystemMessage("⚠️ 当前没有活动会话，无法 Fork。");
+          return true;
+        }
+        addUserMessage(raw); // 显示用户输入的 slash 命令
+        await forkSession(activeSessionId);
+        clearMessages();
+        addToast("会话已 Fork 并切换", "success");
+        return true;
+      }
       // 检查是否匹配某个 skill
       const matched = skills.find(
         (s) => s.name.toLowerCase() === cmd
@@ -192,7 +205,7 @@ ${content}
       }
       return false;
     },
-    [skills, readSkill, addSystemMessage, clearMessages, addUserMessage, setStreaming, activeSessionId, mode, setActiveSessionId, addToast]
+    [skills, readSkill, addSystemMessage, clearMessages, addUserMessage, setStreaming, activeSessionId, mode, setActiveSessionId, addToast, forkSession]
   );
 
   const handleSend = useCallback(async () => {
