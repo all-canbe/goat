@@ -12,6 +12,12 @@ const EXAMPLE_PROMPTS = [
   { icon: ListChecks, text: "列出待办事项" },
 ];
 
+const AGENT_MESSAGE_TYPES = new Set(["assistant", "tool_call", "tool_result"]);
+
+function isAgentMessage(type: string): boolean {
+  return AGENT_MESSAGE_TYPES.has(type);
+}
+
 export default function MessageList() {
   const { messages, streamingContent, isStreaming, setDraft, compactionNotices, dismissCompactionNotice } = useChatStore();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -55,7 +61,7 @@ export default function MessageList() {
                 <button
                   key={text}
                   onClick={() => setDraft(text)}
-                  className="flex items-center gap-2 px-3 py-2.5 rounded-md bg-surface border border-border text-left text-xs text-text hover:border-primary/50 hover:bg-surface-hover transition-colors"
+                  className="flex items-center gap-2 px-3 py-2.5 rounded-md bg-surface border border-border text-left text-xs text-text hover:border-primary/50 hover:bg-surface-hover hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring transition-colors"
                 >
                   <Icon size={14} className="text-brand shrink-0" />
                   <span className="truncate">{text}</span>
@@ -70,9 +76,15 @@ export default function MessageList() {
         </div>
       )}
 
-      {messages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} />
-      ))}
+      {messages.map((msg, index) => {
+        const prevMsg = messages[index - 1];
+        const showDivider = prevMsg && isAgentMessage(prevMsg.type) && isAgentMessage(msg.type);
+        return (
+          <div key={msg.id} className={showDivider ? "border-t border-divider" : undefined}>
+            <MessageBubble message={msg} />
+          </div>
+        );
+      })}
 
       {streamingContent && <StreamingThought content={streamingContent} />}
 
