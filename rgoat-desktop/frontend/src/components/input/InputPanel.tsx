@@ -1,5 +1,11 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { Send, ChevronDown, Square } from "lucide-react";
+import {
+  Send,
+  ChevronDown,
+  Square,
+  Paperclip,
+  SlidersHorizontal,
+} from "lucide-react";
 import { tauriInvoke } from "../../lib/tauri-bridge";
 import { useConfigStore } from "../../stores/configStore";
 import { useSessionStore } from "../../stores/sessionStore";
@@ -30,16 +36,12 @@ const BUILTIN_SLASH: SlashItem[] = [
   { name: "help", description: "显示可用命令帮助", kind: "builtin" },
   { name: "clear", description: "清空当前会话消息", kind: "builtin" },
   { name: "skills", description: "列出所有可用 Skill", kind: "builtin" },
-  { name: "model", description: "切换 LLM Provider/模型", kind: "builtin" },
-  { name: "fork", description: "Fork 当前会话（复制并切换到新会话）", kind: "builtin" },
 ];
 
 const HELP_TEXT = `可用 Slash 命令：
 /help    — 显示本帮助
 /clear   — 清空当前会话消息
 /skills  — 列出所有可用 Skill
-/model   — 切换 LLM Provider/模型
-/fork    — Fork 当前会话
 /<skill-name> — 加载指定 Skill 并发送给 Agent 执行
 
 可用模式：Agent / Plan / Flow / YOLO`;
@@ -47,14 +49,27 @@ const HELP_TEXT = `可用 Slash 命令：
 export default function InputPanel({ onModeChange }: InputPanelProps) {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("Agent");
+  const [showProviderMenu, setShowProviderMenu] = useState(false);
+  const [isFocused, setIsFocused] = useState(false);
   // D3-T05: Slash 命令下拉
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { currentProvider, loadProviders } = useConfigStore();
-  const { activeSessionId, setActiveSessionId, forkSession } = useSessionStore();
-  const { isStreaming, setStreaming, addUserMessage, addSystemMessage, clearMessages, cancelAgent, draft, setDraft, focusInputTrigger } = useChatStore();
+  const { providers, currentProvider, switchProvider, loadProviders } =
+    useConfigStore();
+  const { activeSessionId, setActiveSessionId } = useSessionStore();
+  const {
+    isStreaming,
+    setStreaming,
+    addUserMessage,
+    addSystemMessage,
+    clearMessages,
+    cancelAgent,
+    draft,
+    setDraft,
+    focusInputTrigger,
+  } = useChatStore();
   const { skills, loadSkills, readSkill } = useSkillStore();
   const { addToast } = useToastStore();
 
@@ -79,6 +94,12 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
     }
   }, [focusInputTrigger]);
 
+  const currentModel = useMemo(
+    () =>
+      providers.find((p) => p.is_current)?.model || currentProvider || "none",
+    [providers, currentProvider]
+  );
+
   const handleModeChange = useCallback(
     (newMode: Mode) => {
       setMode(newMode);
@@ -86,6 +107,12 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
     },
     [onModeChange]
   );
+
+  // 快捷模式切换：在 MODES 之间循环
+  const cycleMode = useCallback(() => {
+    const nextIndex = (MODES.indexOf(mode) + 1) % MODES.length;
+    handleModeChange(MODES[nextIndex]);
+  }, [mode, handleModeChange]);
 
   // P0-1: 取消 Agent 执行
   const handleCancel = useCallback(async () => {
@@ -135,7 +162,9 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
       }
       if (cmd === "skills") {
         if (skills.length === 0) {
-          addSystemMessage("当前没有可用的 Skill。可在 ~/.goat/skills/<name>/SKILL.md 或 <workspace>/.goat/skills/<name>/SKILL.md 创建。");
+          addSystemMessage(
+            "当前没有可用的 Skill。可在 ~/.goat/skills/<name>/SKILL.md 或 <workspace>/.goat/skills/<name>/SKILL.md 创建。"
+          );
         } else {
           const list = skills
             .map((s) => `- **/${s.name}** (${s.source}) — ${s.description}`)
@@ -144,30 +173,8 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
         }
         return true;
       }
-      if (cmd === "model") {
-        // 通过自定义事件触发 ModelPalette 打开（由 AppLayout 监听）
-        window.dispatchEvent(new CustomEvent("rgoat:open-model-palette"));
-        return true;
-      }
-      if (cmd === "fork") {
-        if (!activeSessionId) {
-          addSystemMessage("⚠️ 当前没有活动会话，无法 Fork。");
-          return true;
-        }
-        try {
-          await forkSession(activeSessionId);
-          clearMessages();
-          addToast("会话已 Fork 并切换", "success");
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          addToast(`Fork 失败：${errorMsg}`, "error");
-        }
-        return true;
-      }
       // 检查是否匹配某个 skill
-      const matched = skills.find(
-        (s) => s.name.toLowerCase() === cmd
-      );
+      const matched = skills.find((s) => s.name.toLowerCase() === cmd);
       if (matched) {
         const content = await readSkill(matched.name);
         if (!content) {
@@ -209,7 +216,18 @@ ${content}
       }
       return false;
     },
-    [skills, readSkill, addSystemMessage, clearMessages, addUserMessage, setStreaming, activeSessionId, mode, setActiveSessionId, addToast, forkSession]
+    [
+      skills,
+      readSkill,
+      addSystemMessage,
+      clearMessages,
+      addUserMessage,
+      setStreaming,
+      activeSessionId,
+      mode,
+      setActiveSessionId,
+      addToast,
+    ]
   );
 
   const handleSend = useCallback(async () => {
@@ -257,14 +275,11 @@ ${content}
   ]);
 
   // D3-T05: 选中 Slash 项 → 插入到输入框
-  const selectSlash = useCallback(
-    (item: SlashItem) => {
-      setInput(`/${item.name} `);
-      setShowSlashMenu(false);
-      setTimeout(() => textareaRef.current?.focus(), 0);
-    },
-    []
-  );
+  const selectSlash = useCallback((item: SlashItem) => {
+    setInput(`/${item.name} `);
+    setShowSlashMenu(false);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }, []);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -272,7 +287,9 @@ ${content}
       if (showSlashMenu && slashFiltered.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          setSlashIndex((prev) => Math.min(prev + 1, slashFiltered.length - 1));
+          setSlashIndex((prev) =>
+            Math.min(prev + 1, slashFiltered.length - 1)
+          );
           return;
         }
         if (e.key === "ArrowUp") {
@@ -325,100 +342,174 @@ ${content}
     adjustHeight();
   }, [input, adjustHeight]);
 
+  const modelButtonLabel = currentProvider
+    ? currentModel && currentModel !== currentProvider
+      ? `${currentProvider} / ${currentModel}`
+      : currentProvider
+    : "Select Provider";
+
   return (
-    <footer className="flex gap-2 px-4 py-3 bg-surface border-t border-border shrink-0">
-      {/* Provider selector — 点击打开 ModelPalette（Ctrl+L） */}
-      <div className="relative">
+    <div className="fixed bottom-[44px] left-1/2 -translate-x-1/2 w-full max-w-[840px] px-4 z-20">
+      <div
+        className={`flex gap-2 p-2 rounded-xl bg-surface border shadow-sm transition-colors ${
+          isFocused
+            ? "border-primary ring-2 ring-ring"
+            : "border-border"
+        }`}
+      >
+        {/* 左侧：附件按钮 */}
         <button
-          onClick={() =>
-            window.dispatchEvent(new CustomEvent("rgoat:open-model-palette"))
-          }
-          title="Ctrl+L 切换模型"
-          className="flex items-center gap-1 px-2.5 py-2 rounded-md bg-bg border border-border text-xs text-text-secondary hover:border-primary transition-colors h-full whitespace-nowrap"
+          type="button"
+          onClick={() => addToast("附件功能待接入", "info")}
+          className="shrink-0 p-2 rounded-lg text-text-secondary hover:bg-surface-hover transition-colors"
+          aria-label="添加附件"
+          title="添加附件"
         >
-          {currentProvider || "Select"}
-          <ChevronDown size={12} />
+          <Paperclip size={18} />
         </button>
-      </div>
 
-      {/* Mode selector */}
-      <div className="flex items-center bg-bg border border-border rounded-md overflow-hidden">
-        {MODES.map((m) => (
-          <button
-            key={m}
-            onClick={() => handleModeChange(m)}
-            className={`px-2.5 py-2 text-xs font-medium transition-colors ${
-              mode === m
-                ? "bg-primary text-white"
-                : "text-text-secondary hover:text-text"
-            }`}
-          >
-            {m}
-          </button>
-        ))}
-      </div>
+        {/* 文本域 + Slash 命令下拉 */}
+        <div className="flex-1 relative">
+          <textarea
+            ref={textareaRef}
+            className="w-full px-3 py-2.5 rounded-lg bg-bg border border-border text-text text-sm placeholder:text-text-tertiary resize-none outline-none focus:border-primary min-h-[48px] max-h-[200px]"
+            placeholder={
+              mode === "Plan"
+                ? "在 Plan Mode 中，agent 将只读取/搜索/分析... (输入 / 查看命令)"
+                : "Ask anything... (Enter to send, Shift+Enter for newline, 输入 / 查看 Slash 命令)"
+            }
+            value={input}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            disabled={isStreaming}
+            rows={1}
+          />
 
-      {/* Textarea + D3-T05 Slash dropdown */}
-      <div className="flex-1 relative">
-        <textarea
-          ref={textareaRef}
-          className="w-full px-3 py-2 rounded-md bg-bg border border-border text-text text-sm resize-none outline-none focus:border-primary min-h-[36px] max-h-[200px]"
-          placeholder={mode === "Plan" ? "在 Plan Mode 中，agent 将只读取/搜索/分析... (输入 / 查看命令)" : "Ask anything... (Enter to send, Shift+Enter for newline, 输入 / 查看 Slash 命令)"}
-          value={input}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          disabled={isStreaming}
-          rows={1}
-        />
-
-        {/* D3-T05: Slash 命令下拉 */}
-        {showSlashMenu && slashFiltered.length > 0 && (
-          <div className="absolute bottom-full left-0 mb-1 z-30 bg-surface border border-border rounded-md shadow-lg py-1 min-w-[320px] max-h-[280px] overflow-y-auto">
-            <div className="px-3 py-1 text-[10px] text-text-secondary border-b border-border mb-1">
-              Slash 命令 (↑↓ 选择, Tab/Enter 确认, Esc 关闭)
+          {/* D3-T05: Slash 命令下拉 */}
+          {showSlashMenu && slashFiltered.length > 0 && (
+            <div className="absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[320px] max-h-[280px] overflow-y-auto">
+              <div className="px-3 py-1 text-[10px] text-text-secondary border-b border-border mb-1">
+                Slash 命令 (↑↓ 选择, Tab/Enter 确认, Esc 关闭)
+              </div>
+              {slashFiltered.map((item, idx) => (
+                <button
+                  key={`${item.kind}-${item.name}`}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                    idx === slashIndex
+                      ? "bg-primary-subtle text-brand"
+                      : "text-text hover:bg-surface-hover"
+                  }`}
+                  onMouseEnter={() => setSlashIndex(idx)}
+                  onClick={() => selectSlash(item)}
+                >
+                  <span className="text-sm font-mono shrink-0">/{item.name}</span>
+                  <span className="text-xs text-text-secondary truncate flex-1">
+                    {item.description}
+                  </span>
+                  <span className="text-[9px] text-text-secondary shrink-0 uppercase border border-border rounded px-1">
+                    {item.kind === "builtin" ? "cmd" : item.kind}
+                  </span>
+                </button>
+              ))}
             </div>
-            {slashFiltered.map((item, idx) => (
-              <button
-                key={`${item.kind}-${item.name}`}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
-                  idx === slashIndex
-                    ? "bg-primary-subtle text-brand"
-                    : "text-text hover:bg-surface-hover"
-                }`}
-                onMouseEnter={() => setSlashIndex(idx)}
-                onClick={() => selectSlash(item)}
-              >
-                <span className="text-sm font-mono shrink-0">/{item.name}</span>
-                <span className="text-xs text-text-secondary truncate flex-1">
-                  {item.description}
-                </span>
-                <span className="text-[9px] text-text-secondary shrink-0 uppercase border border-border rounded px-1">
-                  {item.kind === "builtin" ? "cmd" : item.kind}
-                </span>
-              </button>
-            ))}
-          </div>
+          )}
+        </div>
+
+        {/* 右侧工具区：模型选择器 / 模式切换 / 输入选项 / 发送-取消 */}
+        {/* 1. 模型选择器 */}
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowProviderMenu(!showProviderMenu)}
+            className="flex items-center gap-1 px-2.5 py-2 h-full rounded-lg border border-border bg-transparent text-xs text-text-secondary hover:bg-surface-hover transition-colors whitespace-nowrap"
+            aria-label="切换模型 Provider"
+            title="切换模型 Provider"
+          >
+            <span className="truncate max-w-[140px]">{modelButtonLabel}</span>
+            <ChevronDown size={12} />
+          </button>
+
+          {showProviderMenu && (
+            <>
+              <div
+                className="fixed inset-0 z-10"
+                onClick={() => setShowProviderMenu(false)}
+              />
+              <div className="absolute bottom-full right-0 mb-2 z-20 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[180px]">
+                {providers.map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    onClick={() => {
+                      switchProvider(p.name);
+                      setShowProviderMenu(false);
+                    }}
+                    className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface-hover transition-colors ${
+                      p.is_current ? "text-brand" : "text-text-secondary"
+                    }`}
+                  >
+                    <div>{p.name}</div>
+                    <div className="text-[10px] text-text-secondary">{p.model}</div>
+                  </button>
+                ))}
+                {providers.length === 0 && (
+                  <div className="px-3 py-1.5 text-xs text-text-secondary">
+                    No providers
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* 2. 快捷模式切换 */}
+        <button
+          type="button"
+          onClick={cycleMode}
+          className="shrink-0 px-2.5 py-2 rounded-lg text-xs font-medium bg-surface-active text-brand hover:bg-surface-hover transition-colors"
+          aria-label={`当前模式 ${mode}，点击切换`}
+          title={`当前模式 ${mode}，点击切换`}
+        >
+          {mode}
+        </button>
+
+        {/* 3. 输入选项 */}
+        <button
+          type="button"
+          onClick={() => addToast("输入选项待展开", "info")}
+          className="shrink-0 p-2 rounded-lg text-text-secondary hover:bg-surface-hover transition-colors"
+          aria-label="输入选项"
+          title="输入选项"
+        >
+          <SlidersHorizontal size={18} />
+        </button>
+
+        {/* 4. 发送 / 取消 */}
+        {isStreaming ? (
+          <button
+            type="button"
+            onClick={handleCancel}
+            title="取消 Agent 执行"
+            aria-label="取消 Agent 执行"
+            className="px-4 py-2 rounded-lg bg-error text-white font-semibold text-sm hover:bg-error/90 transition-colors shrink-0 self-end flex items-center justify-center"
+          >
+            <Square size={14} className="fill-white" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!input.trim()}
+            className="px-4 py-2 rounded-lg bg-primary text-white font-semibold text-sm hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 self-end"
+            aria-label="发送"
+            title="发送"
+          >
+            <Send size={16} />
+          </button>
         )}
       </div>
-
-      {/* Send / Stop button — P0-1: isStreaming 时变为取消按钮 */}
-      {isStreaming ? (
-        <button
-          onClick={handleCancel}
-          title="取消 Agent 执行"
-          className="px-4 py-2 rounded-md bg-error text-white font-semibold text-sm hover:bg-error/90 transition-colors shrink-0 self-end flex items-center justify-center"
-        >
-          <Square size={14} className="fill-white" />
-        </button>
-      ) : (
-        <button
-          onClick={handleSend}
-          disabled={!input.trim()}
-          className="px-4 py-2 rounded-md bg-primary text-white font-semibold text-sm hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 self-end"
-        >
-          <Send size={16} />
-        </button>
-      )}
-    </footer>
+    </div>
   );
 }

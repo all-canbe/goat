@@ -8,7 +8,6 @@ import ApprovalDialog from "../dialogs/ApprovalDialog";
 import PlanPreviewDialog from "../dialogs/PlanPreviewDialog";
 import SettingsDialog from "../dialogs/SettingsDialog";
 import CommandPalette from "../command/CommandPalette";
-import ModelPalette from "../model/ModelPalette";
 import Toaster from "../feedback/Toaster";
 import { useAgentEvents } from "../../hooks/useAgentEvents";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
@@ -26,8 +25,6 @@ export default function AppLayout() {
   const { loadProviders } = useConfigStore();
   const [currentMode, setCurrentMode] = useState("Agent");
   const [isCommandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  // Model 快速切换面板状态
-  const [isModelPaletteOpen, setIsModelPaletteOpen] = useState(false);
   // P2: 设置页 Modal 状态
   const [isSettingsOpen, setSettingsOpen] = useState(false);
   // P1: 从 localStorage 初始化折叠状态
@@ -85,15 +82,11 @@ export default function AppLayout() {
     clearMessages();
   }, [clearMessages]);
 
-  // P2: 全局快捷键关闭对话框（优先级：CommandPalette > ModelPalette > SettingsDialog > PlanPreviewDialog）
+  // P2: 全局快捷键关闭对话框（优先级：CommandPalette > SettingsDialog > PlanPreviewDialog）
   // ApprovalDialog 已自行处理 Esc；PlanPreviewDialog 也自行处理 Esc，此处仅作为兜底
   const handleCloseDialog = useCallback(() => {
     if (isCommandPaletteOpen) {
       setCommandPaletteOpen(false);
-      return;
-    }
-    if (isModelPaletteOpen) {
-      setIsModelPaletteOpen(false);
       return;
     }
     if (isSettingsOpen) {
@@ -104,7 +97,7 @@ export default function AppLayout() {
       clearPlanContent();
       return;
     }
-  }, [isCommandPaletteOpen, isModelPaletteOpen, isSettingsOpen, planContent, clearPlanContent]);
+  }, [isCommandPaletteOpen, isSettingsOpen, planContent, clearPlanContent]);
 
   // P2: 主题初始化（读取 localStorage + 注册系统主题变化监听）
   const initTheme = useThemeStore((s) => s.init);
@@ -117,22 +110,12 @@ export default function AppLayout() {
     onToggleCommandPalette: useCallback(() => {
       setCommandPaletteOpen((prev) => !prev);
     }, []),
-    onToggleModelPalette: useCallback(() => {
-      setIsModelPaletteOpen((prev) => !prev);
-    }, []),
     onNewSession: handleNewSession,
     onToggleSidebar: toggleSidebar,
     onToggleRightPanel: toggleRightPanel,
     onFocusInput: triggerFocusInput,
     onCloseDialog: handleCloseDialog,
   });
-
-  // 监听 /model slash 命令派发的事件，打开 ModelPalette
-  useEffect(() => {
-    const handler = () => setIsModelPaletteOpen(true);
-    window.addEventListener("rgoat:open-model-palette", handler);
-    return () => window.removeEventListener("rgoat:open-model-palette", handler);
-  }, []);
 
   useEffect(() => {
     loadProviders();
@@ -188,13 +171,6 @@ export default function AppLayout() {
         onModeChange={handleModeChange}
         onNewSession={handleNewSession}
         onClearMessages={handleClearMessages}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-
-      {/* Model 快速切换面板 */}
-      <ModelPalette
-        isOpen={isModelPaletteOpen}
-        onClose={() => setIsModelPaletteOpen(false)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 

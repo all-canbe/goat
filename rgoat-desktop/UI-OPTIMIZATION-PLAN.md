@@ -430,6 +430,13 @@ export default function RightPanel() {
   - Mode 选择器改为 pill 风格，active 用 `--surface-active` + `--text`，inactive `--text-secondary`。
   - 发送按钮保持 Primary；取消按钮保持 Danger。
   - Slash 命令下拉改为 `--shadow-md`、圆角 12px、active 项 `--primary-subtle` + `--text-brand`。
+- **参考 Trae Work 输入框的交互细节（差异化适配）**：
+  - 整体采用悬浮卡片布局，底部居中，与主内容区保持视觉层级分离。
+  - 左侧放置**附件按钮**（回形针图标），支持添加文件到当前对话；不显示录音/麦克风按钮。
+  - 右侧工具区顺序：**模型选择器**（显示当前 Provider/Model，如 `Kimi-K2.7-Code`）→ **快捷模式切换按钮**（替代闪电图标，点击后在常用模式间快速切换，例如 Agent / YOLO，hover/tooltip 提示当前模式）→ **设置/展开按钮**（可选，展开更多输入选项）→ **发送/取消按钮**。
+  - 快捷模式切换按钮使用 ghost 样式，active 状态使用 `--surface-active` + `--text-brand`，不采用 Trae 的闪电图标，以避免与“加速/强力模式”语义混淆。
+  - placeholder 保持现有提示文案，居左显示，字号 `text-sm`，颜色 `--text-tertiary`。
+  - 输入框获得焦点时，卡片边框变为 `--primary`，并显示 `--ring` 焦点环。
 
 ```tsx
 // 关键结构

@@ -1,6 +1,5 @@
-import { Wifi, WifiOff, ShieldAlert, FileEdit, Wrench, Coins } from "lucide-react";
+import { Wifi, WifiOff, ShieldAlert, FileEdit, Coins } from "lucide-react";
 import { useConfigStore } from "../../stores/configStore";
-import { useSessionStore } from "../../stores/sessionStore";
 import type { TokenUsage } from "../../stores/chatStore";
 
 interface StatusBarProps {
@@ -34,19 +33,24 @@ export default function StatusBar({
   currentMode,
   pendingApprovals,
   totalChanges,
-  toolCallCount,
   tokenUsage,
 }: StatusBarProps) {
   const { currentProvider, providers } = useConfigStore();
-  const { sessions } = useSessionStore();
 
   const currentModel =
     providers.find((p) => p.is_current)?.model || currentProvider || "none";
 
   const totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
 
+  const providerModelLabel = currentProvider
+    ? currentModel && currentModel !== currentProvider
+      ? `${currentProvider} / ${currentModel}`
+      : currentProvider
+    : "No provider";
+
   return (
-    <footer className="flex items-center gap-3 px-4 py-0.5 bg-surface border-t border-border text-xs text-text-secondary h-7 shrink-0">
+    <footer className="flex items-center gap-3 px-4 h-7 bg-bg-elevated border-t border-border text-2xs text-text-secondary shrink-0">
+      {/* 左侧：状态指示灯 + 当前工作区 */}
       <span
         className={`inline-block w-2 h-2 rounded-full ${
           isStreaming ? "bg-warning animate-pulse" : "bg-success"
@@ -54,50 +58,26 @@ export default function StatusBar({
       />
       <span>{isStreaming ? "Streaming" : "Ready"}</span>
 
-      <span className="text-border">|</span>
-      <span>
-        {currentProvider ? `${currentProvider} / ${currentModel}` : "No provider"}
+      <span className="w-1 h-1 rounded-full bg-border-strong" />
+      <span className="font-mono truncate max-w-[200px]">当前工作区</span>
+
+      <span className="w-1 h-1 rounded-full bg-border-strong" />
+
+      {/* 中部：Provider/Model + Mode */}
+      <span className="font-mono truncate max-w-[260px]">
+        {providerModelLabel}
       </span>
 
-      <span className="text-border">|</span>
-      <span>Mode: {currentMode}</span>
+      <span className="w-1 h-1 rounded-full bg-border-strong" />
+      <span>{currentMode}</span>
 
-      <span className="text-border">|</span>
-      <span>{sessions.length} session(s)</span>
+      <span className="flex-1" />
 
-      {/* D1-T07: 审批/变更/工具调用统计 */}
-      <span className="text-border">|</span>
+      {/* 右侧：Tokens / Changes（仅非零）/ Approvals（仅非零）/ WiFi */}
       <span
         className={`flex items-center gap-1 ${
-          pendingApprovals > 0 ? "text-warning" : "text-text-secondary"
+          totalTokens > 0 ? "text-text" : ""
         }`}
-        title="Pending approvals"
-      >
-        <ShieldAlert size={11} />
-        <span>Approvals: {pendingApprovals}</span>
-      </span>
-
-      <span className="text-border">|</span>
-      <span
-        className={`flex items-center gap-1 ${
-          totalChanges > 0 ? "text-text" : "text-text-secondary"
-        }`}
-        title="File changes in current session"
-      >
-        <FileEdit size={11} />
-        <span>Changes: {totalChanges}</span>
-      </span>
-
-      <span className="text-border">|</span>
-      <span className="flex items-center gap-1 text-text-secondary" title="Tool calls in current session">
-        <Wrench size={11} />
-        <span>Tools: {toolCallCount}</span>
-      </span>
-
-      {/* P0-2: Token 用量 + 成本估算 */}
-      <span className="text-border">|</span>
-      <span
-        className={`flex items-center gap-1 ${totalTokens > 0 ? "text-text" : "text-text-secondary"}`}
         title={`Token 用量（本次会话）\nInput: ${tokenUsage.inputTokens}\nOutput: ${tokenUsage.outputTokens}\n估算成本: ${formatCost(tokenUsage.totalCost)}`}
       >
         <Coins size={11} />
@@ -108,12 +88,24 @@ export default function StatusBar({
         </span>
       </span>
 
-      <span className="flex-1" />
+      {totalChanges > 0 && (
+        <span className="flex items-center gap-1 text-text" title="File changes in current session">
+          <FileEdit size={11} />
+          <span>{totalChanges}</span>
+        </span>
+      )}
+
+      {pendingApprovals > 0 && (
+        <span className="flex items-center gap-1 text-warning" title="Pending approvals">
+          <ShieldAlert size={11} />
+          <span>{pendingApprovals}</span>
+        </span>
+      )}
 
       {isStreaming ? (
-        <Wifi size={12} className="text-warning" />
+        <Wifi size={12} className="text-warning" aria-label="Streaming active" />
       ) : (
-        <WifiOff size={12} className="text-text-secondary" />
+        <WifiOff size={12} className="text-text-tertiary" aria-label="Idle" />
       )}
     </footer>
   );

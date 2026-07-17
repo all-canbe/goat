@@ -24,7 +24,7 @@ export default function MessageList() {
   const latestNotice = compactionNotices[compactionNotices.length - 1];
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-1">
+    <div className="flex-1 overflow-y-auto px-4 py-3 pb-32 flex flex-col gap-1">
       {/* P1: 上下文压缩通知条（醒目展示，可关闭） */}
       {latestNotice && (
         <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-md bg-primary-subtle border border-primary/30 text-brand text-xs">
