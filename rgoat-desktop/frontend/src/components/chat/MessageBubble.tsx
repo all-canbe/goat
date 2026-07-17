@@ -25,7 +25,7 @@ function CodeBlock({ children, className }: { children?: React.ReactNode; classN
   // P1: 右上角悬浮复制按钮（hover 显示），点击复制到剪贴板
   return (
     <div className="relative group my-2">
-      <pre className="bg-bg-elevated rounded-md overflow-x-auto p-3 pr-10">
+      <pre className="bg-bg-elevated border border-border rounded-lg overflow-x-auto p-3 pr-10">
         <code className={className}>{children}</code>
       </pre>
       <button
@@ -48,7 +48,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     case "user":
       return (
         <div className="flex justify-end mb-1">
-          <div className="max-w-[80%] px-4 py-2.5 rounded-lg bg-primary text-white text-sm">
+          <div className="max-w-[80%] px-4 py-2.5 rounded-xl rounded-tr-sm bg-surface-active text-text text-sm">
             {message.content}
           </div>
         </div>
@@ -56,8 +56,11 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
     case "assistant":
       return (
-        <div className="flex justify-start mb-1">
-          <div className="max-w-[85%] px-4 py-2.5 rounded-lg bg-surface border border-border text-sm prose prose-invert prose-sm max-w-none">
+        <div className="flex justify-start mb-1 gap-3">
+          <div className="w-7 h-7 rounded-full bg-primary-subtle flex items-center justify-center shrink-0">
+            <span className="text-xs font-semibold text-text-brand">R</span>
+          </div>
+          <div className="max-w-[85%] text-sm text-text prose prose-invert prose-sm max-w-none">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeHighlight]}
@@ -73,7 +76,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                     return <CodeBlock className={className}>{children}</CodeBlock>;
                   }
                   return (
-                    <code className="bg-surface-hover px-1.5 py-0.5 rounded text-xs font-mono text-warning">
+                    <code className="bg-surface-hover px-1.5 py-0.5 rounded text-xs font-mono text-text-secondary">
                       {children}
                     </code>
                   );
@@ -104,7 +107,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     case "system":
       return (
         <div className="flex justify-center mb-1">
-          <span className="text-xs text-text-secondary px-2 py-0.5">
+          <span className="text-xs text-text-tertiary px-2 py-0.5">
             {message.content}
           </span>
         </div>
@@ -113,9 +116,9 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     case "error":
       return (
         <div className="flex justify-start mb-1">
-          <div className="max-w-[85%] px-3 py-2 rounded-md border border-error/40 bg-error/5 text-sm flex items-start gap-2">
+          <div className="max-w-[85%] px-3 py-2 rounded-md border border-error/40 bg-error-subtle text-sm flex items-start gap-2">
             <AlertCircle size={16} className="text-error shrink-0 mt-0.5" />
-            <span className="text-error/90">{message.content}</span>
+            <span className="text-error">{message.content}</span>
           </div>
         </div>
       );
