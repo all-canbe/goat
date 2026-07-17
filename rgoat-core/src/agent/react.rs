@@ -176,7 +176,9 @@ impl ReActAgent {
     /// 4. `<workspace>/CLAUDE.md`（Claude Code 生态兼容）
     /// 5. `<workspace>/AGENTS.md`（OpenCode 生态兼容）
     /// 6. 从 cwd 递归向上查找 `.goat/rules.md`
-    pub fn load_rules(workspace: &str) -> Vec<String> {
+    ///
+    /// 返回 `(rules, rules_loaded)`：第二个 bool 表示是否从磁盘加载到任何规则文件。
+    pub fn load_rules(workspace: &str) -> (Vec<String>, bool) {
         let mut rules = Vec::new();
         let ws = std::path::Path::new(workspace);
 
@@ -267,7 +269,8 @@ impl ReActAgent {
             }
         }
 
-        rules
+        let loaded = !rules.is_empty();
+        (rules, loaded)
     }
 
     /// 从文件系统扫描 skills（全局 + 项目级，项目级覆盖全局同名）
@@ -447,7 +450,7 @@ impl ReActAgent {
             .await
             .map_err(|e| AgentError::Tool(e.to_string()))?;
 
-        let rules = Self::load_rules(workspace);
+        let (rules, rules_loaded) = Self::load_rules(workspace);
         let skills = Self::load_skills(workspace);
         // P0: 自动检测用户 prompt 中的技术栈要求并注入 system prompt
         let tech_stack = extract_tech_stack_constraints(user_prompt);
@@ -455,6 +458,7 @@ impl ReActAgent {
             self.get_mode(),
             workspace,
             &rules,
+            rules_loaded,
             &skills,
             &self.tools_description(),
             tech_stack.as_deref(),

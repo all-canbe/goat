@@ -226,7 +226,8 @@ impl FlowPipeline {
         info!("Starting Flow pipeline for session {}", session_id);
 
         // D3: 复用 load_rules，避免与 implement_agent.run 内部 load_rules 重复加载
-        let project_ctx = ReActAgent::load_rules(workspace).join("\n\n");
+        let (rules, _) = ReActAgent::load_rules(workspace);
+        let project_ctx = rules.join("\n\n");
 
         // 第一轮：实现
         self.emit_thought(0, "[1] Implementation phase starting...").await;
@@ -581,7 +582,8 @@ impl FlowPipeline {
             .join("\n");
 
         // D3-T01b: 复用 load_rules，避免与 implement_agent.run 内部 load_rules 重复加载
-        let project_ctx = ReActAgent::load_rules(workspace).join("\n\n");
+        let (rules, _) = ReActAgent::load_rules(workspace);
+        let project_ctx = rules.join("\n\n");
         let fix_prompt = format!(
             "## Original Task\n{}\n\n## Review Findings to Fix\n{}\n\n{}Fix each issue above by editing the affected files.",
             task,
