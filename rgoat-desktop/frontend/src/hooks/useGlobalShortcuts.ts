@@ -8,17 +8,23 @@ interface UseGlobalShortcutsOptions {
   onNewSession: () => void;
   /** 切换 Sidebar 折叠状态 */
   onToggleSidebar: () => void;
+  /** 切换右侧面板可见性 */
+  onToggleRightPanel: () => void;
   /** 聚焦输入框 */
   onFocusInput: () => void;
   /** 关闭当前打开的对话框 */
   onCloseDialog: () => void;
+  /** 切换 ModelPalette 开关（Ctrl/Cmd+L） */
+  onToggleModelPalette: () => void;
 }
 
 /**
  * 集中管理全局快捷键：
  * - Cmd/Ctrl+K → 切换 CommandPalette
+ * - Cmd/Ctrl+L → 切换 ModelPalette
  * - Cmd/Ctrl+N → 新建会话
  * - Cmd/Ctrl+B → 切换 Sidebar 折叠
+ * - Cmd/Ctrl+J → 切换右侧面板
  * - Cmd/Ctrl+/ → 聚焦输入框
  * - Escape → 关闭当前打开的对话框
  *
@@ -28,8 +34,10 @@ export function useGlobalShortcuts({
   onToggleCommandPalette,
   onNewSession,
   onToggleSidebar,
+  onToggleRightPanel,
   onFocusInput,
   onCloseDialog,
+  onToggleModelPalette,
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -47,6 +55,11 @@ export function useGlobalShortcuts({
           onToggleCommandPalette();
           return;
         }
+        if (key === "l") {
+          e.preventDefault();
+          onToggleModelPalette();
+          return;
+        }
         if (key === "n") {
           e.preventDefault();
           onNewSession();
@@ -55,6 +68,11 @@ export function useGlobalShortcuts({
         if (key === "b") {
           e.preventDefault();
           onToggleSidebar();
+          return;
+        }
+        if (key === "j") {
+          e.preventDefault();
+          onToggleRightPanel();
           return;
         }
         if (key === "/") {
@@ -79,8 +97,10 @@ export function useGlobalShortcuts({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     onToggleCommandPalette,
+    onToggleModelPalette,
     onNewSession,
     onToggleSidebar,
+    onToggleRightPanel,
     onFocusInput,
     onCloseDialog,
   ]);

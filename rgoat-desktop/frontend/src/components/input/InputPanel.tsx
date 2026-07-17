@@ -30,12 +30,14 @@ const BUILTIN_SLASH: SlashItem[] = [
   { name: "help", description: "显示可用命令帮助", kind: "builtin" },
   { name: "clear", description: "清空当前会话消息", kind: "builtin" },
   { name: "skills", description: "列出所有可用 Skill", kind: "builtin" },
+  { name: "model", description: "切换 LLM Provider/模型", kind: "builtin" },
 ];
 
 const HELP_TEXT = `可用 Slash 命令：
 /help    — 显示本帮助
 /clear   — 清空当前会话消息
 /skills  — 列出所有可用 Skill
+/model   — 切换 LLM Provider/模型
 /<skill-name> — 加载指定 Skill 并发送给 Agent 执行
 
 可用模式：Agent / Plan / Flow / YOLO`;
@@ -43,14 +45,12 @@ const HELP_TEXT = `可用 Slash 命令：
 export default function InputPanel({ onModeChange }: InputPanelProps) {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("Agent");
-  const [showProviderMenu, setShowProviderMenu] = useState(false);
   // D3-T05: Slash 命令下拉
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { providers, currentProvider, switchProvider, loadProviders } =
-    useConfigStore();
+  const { currentProvider, loadProviders } = useConfigStore();
   const { activeSessionId, setActiveSessionId } = useSessionStore();
   const { isStreaming, setStreaming, addUserMessage, addSystemMessage, clearMessages, cancelAgent, draft, setDraft, focusInputTrigger } = useChatStore();
   const { skills, loadSkills, readSkill } = useSkillStore();
@@ -140,6 +140,11 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
             .join("\n");
           addSystemMessage(`可用 Skill（${skills.length} 个）：\n${list}`);
         }
+        return true;
+      }
+      if (cmd === "model") {
+        // 通过自定义事件触发 ModelPalette 打开（由 AppLayout 监听）
+        window.dispatchEvent(new CustomEvent("rgoat:open-model-palette"));
         return true;
       }
       // 检查是否匹配某个 skill
@@ -305,46 +310,18 @@ ${content}
 
   return (
     <footer className="flex gap-2 px-4 py-3 bg-surface border-t border-border shrink-0">
-      {/* Provider selector */}
+      {/* Provider selector — 点击打开 ModelPalette（Ctrl+L） */}
       <div className="relative">
         <button
-          onClick={() => setShowProviderMenu(!showProviderMenu)}
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("rgoat:open-model-palette"))
+          }
+          title="Ctrl+L 切换模型"
           className="flex items-center gap-1 px-2.5 py-2 rounded-md bg-bg border border-border text-xs text-text-secondary hover:border-primary transition-colors h-full whitespace-nowrap"
         >
           {currentProvider || "Select"}
           <ChevronDown size={12} />
         </button>
-
-        {showProviderMenu && (
-          <>
-            <div
-              className="fixed inset-0 z-10"
-              onClick={() => setShowProviderMenu(false)}
-            />
-            <div className="absolute bottom-full left-0 mb-1 z-20 bg-surface border border-border rounded-md shadow-lg py-1 min-w-[180px]">
-              {providers.map((p) => (
-                <button
-                  key={p.name}
-                  onClick={() => {
-                    switchProvider(p.name);
-                    setShowProviderMenu(false);
-                  }}
-                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface-hover transition-colors ${
-                    p.is_current ? "text-brand" : "text-text-secondary"
-                  }`}
-                >
-                  <div>{p.name}</div>
-                  <div className="text-[10px] text-text-secondary">{p.model}</div>
-                </button>
-              ))}
-              {providers.length === 0 && (
-                <div className="px-3 py-1.5 text-xs text-text-secondary">
-                  No providers
-                </div>
-              )}
-            </div>
-          </>
-        )}
       </div>
 
       {/* Mode selector */}
