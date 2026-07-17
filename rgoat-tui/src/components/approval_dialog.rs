@@ -12,7 +12,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
-use rgoat_core::security::approval::ApprovalDecision;
+use rgoat_core::security::approval::{ApprovalDecision, ApprovalScope};
 
 use crate::components::theme::Theme;
 
@@ -228,14 +228,17 @@ impl ApprovalDialog {
             'y' => Some(ApprovalDecision {
                 approved: true,
                 approve_all: false,
+                scope: ApprovalScope::Once,
             }),
             'a' => Some(ApprovalDecision {
                 approved: true,
                 approve_all: true,
+                scope: ApprovalScope::Session,
             }),
             'n' | '\x1b' => Some(ApprovalDecision {
                 approved: false,
                 approve_all: false,
+                scope: ApprovalScope::Once,
             }),
             _ => None,
         }

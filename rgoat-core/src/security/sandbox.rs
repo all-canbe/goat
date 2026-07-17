@@ -237,6 +237,152 @@ pub mod windows {
 }
 
 // ============================================================================
+// Linux Landlock + seccomp 沙箱（通过 extrasafe）
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use super::*;
+    use extrasafe::builtins::SystemIO;
+    use extrasafe::SafetyContext;
+    use std::sync::Mutex;
+
+    /// Linux 沙箱：Landlock（文件系统）+ seccomp（syscall 过滤）
+    ///
+    /// 通过 `extrasafe` crate 统一封装。Landlock 在内核层强制执行
+    /// 文件路径限制，seccomp 过滤危险 syscall。
+    ///
+    /// # 线程模型注意
+    /// `apply_to_current_thread()` 是线程级限制。在 tokio 线程池中
+    /// 调用会限制该 worker 线程。推荐在专用 `std::thread::spawn` 线程
+    /// 上调用 `init()`，或仅在 agent 执行前的独立线程中使用。
+    pub struct LinuxSandbox {
+        initialized: Mutex<bool>,
+        level: Mutex<SandboxLevel>,
+        workspace: Mutex<PathBuf>,
+    }
+
+    impl LinuxSandbox {
+        pub fn new() -> Self {
+            Self {
+                initialized: Mutex::new(false),
+                level: Mutex::new(SandboxLevel::ReadOnly),
+                workspace: Mutex::new(PathBuf::new()),
+            }
+        }
+    }
+
+    impl Sandbox for LinuxSandbox {
+        fn init(&self, level: SandboxLevel, workspace: &PathBuf) -> Result<(), SandboxError> {
+            let mut initialized = self.initialized.lock().unwrap();
+            if *initialized {
+                return Ok(());
+            }
+
+            *self.level.lock().unwrap() = level;
+            *self.workspace.lock().unwrap() = workspace.clone();
+
+            if level == SandboxLevel::DangerFullAccess {
+                return Err(SandboxError::InitFailed(
+                    "DangerFullAccess sandbox level is not permitted".to_string(),
+                ));
+            }
+
+            // 构建 extrasafe 安全上下文：Landlock 文件系统规则
+            let io = match level {
+                SandboxLevel::ReadOnly => {
+                    SystemIO::nothing().allow_read_path(workspace)
+                }
+                SandboxLevel::WorkspaceWrite => {
+                    SystemIO::nothing()
+                        .allow_read_path(workspace)
+                        .allow_write_file(workspace)
+                        .allow_create_in_dir(workspace)
+                        .allow_list_dir(workspace)
+                }
+                SandboxLevel::DangerFullAccess => unreachable!(),
+            };
+
+            let ctx = SafetyContext::new().enable(io).map_err(|e| {
+                SandboxError::InitFailed(format!("extrasafe enable failed: {e}"))
+            })?;
+
+            // 应用到当前线程。Landlock/seccomp 不可用时优雅降级
+            // 到应用层路径检查（is_path_allowed 仍然有效）
+            match ctx.apply_to_current_thread() {
+                Ok(()) => {
+                    tracing::info!(
+                        "Landlock + seccomp sandbox enforced at level {:?}",
+                        level
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Landlock/seccomp not available (kernel too old?): {}. \
+                         Falling back to application-level path checking only.",
+                        e
+                    );
+                }
+            }
+
+            *initialized = true;
+            Ok(())
+        }
+
+        fn is_path_allowed(&self, path: &str) -> bool {
+            let workspace = self.workspace.lock().unwrap();
+            if workspace.as_os_str().is_empty() {
+                return false;
+            }
+            let p = std::path::Path::new(path);
+            let resolved = if p.is_relative() {
+                match std::fs::canonicalize(workspace.join(p)) {
+                    Ok(r) => r,
+                    Err(_) => return false,
+                }
+            } else {
+                match std::fs::canonicalize(p) {
+                    Ok(r) => r,
+                    Err(_) => return false,
+                }
+            };
+            let workspace_canonical = match std::fs::canonicalize(workspace.as_path()) {
+                Ok(w) => w,
+                Err(_) => return false,
+            };
+            if !resolved.starts_with(&workspace_canonical) {
+                return false;
+            }
+            if let Some(home) = std::env::var("HOME").ok() {
+                for protected in &[".ssh", ".gnupg"] {
+                    if resolved.starts_with(std::path::Path::new(&home).join(protected)) {
+                        return false;
+                    }
+                }
+            }
+            if resolved.components().any(|c| {
+                c.as_os_str().to_str().map_or(false, |n| {
+                    matches!(n, ".git" | "node_modules" | "target")
+                })
+            }) {
+                return false;
+            }
+            true
+        }
+
+        fn level(&self) -> SandboxLevel {
+            *self.level.lock().unwrap()
+        }
+    }
+
+    impl Default for LinuxSandbox {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+// ============================================================================
 // 工厂
 // ============================================================================
 
@@ -246,7 +392,11 @@ pub fn create_sandbox() -> Box<dyn Sandbox> {
     {
         Box::new(windows::WindowsSandbox::new())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux::LinuxSandbox::new())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Box::new(NoopSandbox::new())
     }

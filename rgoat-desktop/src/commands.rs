@@ -13,7 +13,6 @@ use crate::AppState;
 pub struct SendPromptRequest {
     pub prompt: String,
     pub session_id: Option<String>,
-    #[allow(dead_code)]
     pub mode: Option<String>,
 }
 
@@ -81,12 +80,40 @@ pub async fn send_prompt(
         .map_err(|e| e.to_string())?;
 
     let agent = state.agent.clone();
+    // D2: 根据前端传的 mode 设置 AgentMode
+    let agent_mode = request.mode.as_deref()
+        .and_then(|m| match m.to_lowercase().as_str() {
+            "agent" => Some(rgoat_core::security::approval::AgentMode::Agent),
+            "plan" => Some(rgoat_core::security::approval::AgentMode::Plan),
+            "flow" => Some(rgoat_core::security::approval::AgentMode::Flow),
+            "accept-edits" | "accept_edits" => Some(rgoat_core::security::approval::AgentMode::AcceptEdits),
+            "yolo" => Some(rgoat_core::security::approval::AgentMode::Yolo),
+            _ => None,
+        })
+        .unwrap_or(rgoat_core::security::approval::AgentMode::Agent);
+    agent.set_mode(agent_mode);
     let prompt = request.prompt.clone();
     let workspace = state.workspace.clone();
 
     // Spawn agent in background
     let handle = tokio::spawn(async move {
-        let result = agent.run(&sid, &prompt, &workspace).await;
+        // D3-T04: Plan Mode 下使用 PlanRunner 两阶段流程
+        let result = if agent_mode == rgoat_core::security::approval::AgentMode::Plan {
+            let runner = rgoat_core::agent::plan_runner::PlanRunner::new(
+                agent.clone(),
+                workspace.clone(),
+                sid.clone(),
+            );
+            runner.run(&prompt).await.map(|plan_result| {
+                tracing::info!(
+                    "Plan completed: phase={:?}, path={:?}",
+                    plan_result.phase,
+                    plan_result.plan_path
+                );
+            })
+        } else {
+            agent.run(&sid, &prompt, &workspace).await.map(|_| ())
+        };
         if let Err(e) = &result {
             tracing::error!("Agent error: {}", e);
         }
@@ -236,6 +263,9 @@ pub async fn configure_provider(
 pub struct ApprovalResponse {
     pub tool_name: String,
     pub approved: bool,
+    /// D1-T03: 批准范围 — "once" | "session" | "all_similar" | "always"
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Frontend responds to a pending approval request
@@ -247,11 +277,27 @@ pub async fn respond_approval(
     let mut pending = state.pending_approval.lock().map_err(|e| e.to_string())?;
     if let Some(approval) = pending.take() {
         if approval.tool_name == response.tool_name {
-            let _ = approval.sender.send(response.approved);
+            // D1-T03: 解析 scope 字符串为 ApprovalScope 枚举
+            use rgoat_core::security::approval::{ApprovalDecision, ApprovalScope};
+            let scope = response.scope.as_deref()
+                .and_then(|s| match s {
+                    "once" => Some(ApprovalScope::Once),
+                    "session" => Some(ApprovalScope::Session),
+                    "all_similar" => Some(ApprovalScope::AllSimilar),
+                    "always" => Some(ApprovalScope::Always),
+                    _ => None,
+                })
+                .unwrap_or(ApprovalScope::Once);
+            let decision = ApprovalDecision {
+                approved: response.approved,
+                approve_all: matches!(scope, ApprovalScope::Session | ApprovalScope::AllSimilar),
+                scope,
+            };
+            let _ = approval.sender.send(decision);
             Ok(format!(
-                "Approval {} for tool '{}'",
+                "Approval {} for tool '{}' (scope={:?})",
                 if response.approved { "granted" } else { "denied" },
-                response.tool_name
+                response.tool_name, scope
             ))
         } else {
             Err(format!(
@@ -402,4 +448,58 @@ pub async fn respond_ask_user(
             response.request_id
         ))
     }
+}
+
+// ── D1-T03: Session changes management ──
+
+/// 获取指定会话的所有文件变更记录
+#[tauri::command]
+pub async fn get_session_changes(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<crate::FileChangeRecord>, String> {
+    let changes = state.session_changes.lock().map_err(|e| e.to_string())?;
+    Ok(changes.get(&session_id).cloned().unwrap_or_default())
+}
+
+/// 清空指定会话的所有文件变更记录
+#[tauri::command]
+pub async fn clear_session_changes(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let mut changes = state.session_changes.lock().map_err(|e| e.to_string())?;
+    changes.remove(&session_id);
+    Ok(())
+}
+
+/// 前端监听 file_changed 事件后调用此命令写入变更记录
+#[tauri::command]
+pub async fn add_session_change(
+    state: State<'_, AppState>,
+    session_id: String,
+    change: crate::FileChangeRecord,
+) -> Result<(), String> {
+    let mut changes = state.session_changes.lock().map_err(|e| e.to_string())?;
+    changes.entry(session_id).or_insert_with(Vec::new).push(change);
+    Ok(())
+}
+
+// ── D3-T05: Skill 系统 IPC ──
+
+/// 列出当前可用的 skills（全局 + 项目级，项目级覆盖同名）
+#[tauri::command]
+pub async fn list_skills(
+    state: State<'_, AppState>,
+) -> Result<Vec<rgoat_core::agent::react::SkillInfo>, String> {
+    Ok(rgoat_core::agent::react::ReActAgent::load_skills_structured(&state.workspace))
+}
+
+/// 读取指定 skill 的完整 SKILL.md 内容
+#[tauri::command]
+pub async fn read_skill(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Option<String>, String> {
+    Ok(rgoat_core::agent::react::ReActAgent::read_skill_content(&state.workspace, &name))
 }

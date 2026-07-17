@@ -9,8 +9,7 @@
 //! 6. 将 observation 加入历史，重复直到得到最终答案
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,22 +21,13 @@ use crate::conversation::templates::extract_tech_stack_constraints;
 use crate::core::cancellation::CancellationToken;
 use crate::core::event_bus::{EventBus, EventType};
 use crate::provider::provider::{ChatMessage, ChatResponse, Choice, LlmProvider, MessageContent, Role, ToolCallDef, ToolDef, UsageInfo};
-use crate::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder, Decision, ToolCategory};
+use crate::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder, Decision, ToolCategory, ApprovalScope, SessionCacheKey, calculate_danger_score};
+use crate::security::sandbox::Sandbox;
 use crate::tools::registry::{ToolRegistry, ToolResult};
 use super::steps_tracker::StepsTracker;
 use super::planner::Planner;
 use super::task_persistence::{TaskPersistence, TaskEvent, TaskStatus};
 use super::checkpoint::{Checkpoint, CheckpointData, CheckpointStatus};
-
-/// Thread-safe mutable cell for AgentMode.
-/// Single writer (TUI event loop), multiple readers.
-pub(crate) struct SyncMode(UnsafeCell<AgentMode>);
-unsafe impl Sync for SyncMode {}
-impl SyncMode {
-    fn new(mode: AgentMode) -> Self { Self(UnsafeCell::new(mode)) }
-    fn get(&self) -> AgentMode { unsafe { *self.0.get() } }
-    fn set(&self, mode: AgentMode) { unsafe { *self.0.get() = mode; } }
-}
 
 /// ReAct Agent
 pub struct ReActAgent {
@@ -48,7 +38,7 @@ pub struct ReActAgent {
     pub conversation: Arc<ConversationManager>,
     pub event_bus: Arc<EventBus>,
     pub cancellation: CancellationToken,
-    pub(crate) mode: SyncMode,
+    pub(crate) mode: AtomicUsize,
     /// Whether the agent is currently paused (shared with desktop IPC).
     pub paused: Arc<AtomicBool>,
     /// Oneshot channel for blocking tool-approval handshake with TUI.
@@ -57,6 +47,10 @@ pub struct ReActAgent {
     pub context_window: Arc<AtomicU64>,
     /// B1: 子 Agent 自动审批标志 — 非破坏性工具调用直接 Allow（不等待 TUI 审批）
     pub auto_approve: bool,
+    /// D1-T02: 会话级审批缓存 — 用户选择 Session/AllSimilar 后同工具自动通过
+    pub session_cache: Arc<std::sync::Mutex<std::collections::HashMap<SessionCacheKey, Decision>>>,
+    /// 沙箱安全层（可选）— 工具执行前校验文件路径是否在允许范围内
+    pub sandbox: Option<Arc<dyn Sandbox>>,
 }
 
 impl ReActAgent {
@@ -81,11 +75,13 @@ impl ReActAgent {
             conversation,
             event_bus,
             cancellation,
-            mode: SyncMode::new(mode),
+            mode: AtomicUsize::new(mode as usize),
             paused,
             approval_responder,
             context_window: Arc::new(AtomicU64::new(ctx_win as u64)),
             auto_approve: false,
+            session_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            sandbox: None,
         }
     }
 
@@ -103,11 +99,13 @@ impl ReActAgent {
             conversation: self.conversation.clone(),
             event_bus: self.event_bus.clone(),
             cancellation: self.cancellation.clone(),
-            mode: SyncMode::new(AgentMode::Agent),
+            mode: AtomicUsize::new(AgentMode::Agent as usize),
             paused: self.paused.clone(),
             approval_responder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             context_window: self.context_window.clone(),
             auto_approve: true,
+            session_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            sandbox: self.sandbox.clone(),
         }
     }
 
@@ -118,16 +116,66 @@ impl ReActAgent {
 
     /// 同步 mode（TUI /yolo /agent /plan 等命令调用）
     pub fn set_mode(&self, mode: AgentMode) {
-        self.mode.set(mode);
+        self.mode.store(mode as usize, Ordering::SeqCst);
     }
 
-    /// 从文件系统加载 rules（全局 + 项目 + AGENTS.md + cwd）
+    /// D3: 读取当前 mode
+    pub fn get_mode(&self) -> AgentMode {
+        // D3: transmute 安全 — set_mode 仅存入有效 AgentMode 判别值，#[repr(usize)] 保证布局确定
+        unsafe { std::mem::transmute(self.mode.load(Ordering::SeqCst)) }
+    }
+
+    /// 设置沙箱安全层（builder 风格）
+    ///
+    /// 设置后，agent 在执行文件操作工具（read_file/write_file/edit_file）前
+    /// 会通过 sandbox.is_path_allowed() 校验路径，拒绝 workspace 外或
+    /// 受保护目录（.git/node_modules/target）的访问。
+    ///
+    /// 注意：此方法仅设置应用层路径校验，不会调用 sandbox.init()
+    /// 触发内核级 Landlock/seccomp 限制（因 apply_to_current_thread
+    /// 是线程级限制，不适合 tokio 线程池环境）。
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// 沙箱路径校验 — 在工具执行前检查文件路径是否被允许
+    ///
+    /// 返回 `Some(ToolResult::error)` 表示路径被沙箱拒绝，
+    /// 返回 `None` 表示路径允许或工具不涉及文件路径。
+    fn check_sandbox_allowed(&self, tool_name: &str, arguments: &serde_json::Value) -> Option<ToolResult> {
+        let sandbox = self.sandbox.as_ref()?;
+
+        // 仅对文件操作工具校验 file_path 参数
+        let path_arg = match tool_name {
+            "read_file" | "write_file" | "edit_file" => {
+                arguments.get("file_path").and_then(|v| v.as_str())?
+            }
+            _ => return None, // 非文件操作工具无需校验
+        };
+
+        if !sandbox.is_path_allowed(path_arg) {
+            return Some(ToolResult::error(
+                format!(
+                    "沙箱安全拒绝：路径 '{}' 不在允许范围内（workspace 外或受保护目录）",
+                    path_arg
+                ),
+                "sandbox_path_denied",
+            ));
+        }
+
+        None
+    }
+
+    /// 从文件系统加载 rules（全局 + 项目记忆 + AGENTS.md + cwd）
     ///
     /// 加载顺序（后加载追加，不覆盖）：
-    /// 1. `~/.goat/rules.md`
-    /// 2. `<workspace>/.goat/rules.md`
-    /// 3. `<workspace>/AGENTS.md`
-    /// 4. 从 cwd 递归向上查找 `.goat/rules.md`
+    /// 1. `~/.goat/rules.md`（全局规则）
+    /// 2. `<workspace>/.goat/rules.md`（项目规则）
+    /// 3. `<workspace>/GOAT.md`（Goat 原生项目记忆，优先级最高）
+    /// 4. `<workspace>/CLAUDE.md`（Claude Code 生态兼容）
+    /// 5. `<workspace>/AGENTS.md`（OpenCode 生态兼容）
+    /// 6. 从 cwd 递归向上查找 `.goat/rules.md`
     pub fn load_rules(workspace: &str) -> Vec<String> {
         let mut rules = Vec::new();
         let ws = std::path::Path::new(workspace);
@@ -152,7 +200,23 @@ impl ReActAgent {
             }
         }
 
-        // 3. AGENTS.md: <workspace>/AGENTS.md (兼容 OpenCode 生态)
+        // 3. GOAT.md: Goat 原生项目记忆文件（优先级最高）
+        let goat_md = ws.join("GOAT.md");
+        if goat_md.exists() {
+            if let Ok(content) = std::fs::read_to_string(&goat_md) {
+                rules.push(content);
+            }
+        }
+
+        // 4. CLAUDE.md: 与 Claude Code 生态兼容
+        let claude_md = ws.join("CLAUDE.md");
+        if claude_md.exists() {
+            if let Ok(content) = std::fs::read_to_string(&claude_md) {
+                rules.push(content);
+            }
+        }
+
+        // 5. AGENTS.md: 与 OpenCode 生态兼容
         let agents_md = ws.join("AGENTS.md");
         if agents_md.exists() {
             if let Ok(content) = std::fs::read_to_string(&agents_md) {
@@ -160,14 +224,32 @@ impl ReActAgent {
             }
         }
 
-        // 4. 当前目录规则: 从 cwd 递归向上查找第一个 .goat/rules.md
+        // D3: 6. 嵌套项目记忆: 从 cwd 递归向上查找 GOAT.md/CLAUDE.md/AGENTS.md/.goat/rules.md
         if let Ok(cwd) = std::env::current_dir() {
-            let project_rules_canonical = project_rules.canonicalize().ok();
+            let ws_canonical = ws.canonicalize().ok();
             let mut current = cwd;
             loop {
+                // D3: 查找当前层级的记忆文件
+                for fname in &["GOAT.md", "CLAUDE.md", "AGENTS.md"] {
+                    let candidate = current.join(fname);
+                    if candidate.exists() {
+                        // D3: 跳过与 workspace 根目录重复的文件（已在 #3/#4/#5 加载）
+                        let is_workspace_root = match (&ws_canonical, candidate.canonicalize().ok()) {
+                            (Some(ws), Some(c)) => c.parent().map(|p| p == *ws).unwrap_or(false),
+                            _ => false,
+                        };
+                        if !is_workspace_root {
+                            if let Ok(content) = std::fs::read_to_string(&candidate) {
+                                rules.push(content);
+                            }
+                        }
+                    }
+                }
+
+                // D3: 查找当前层级的 .goat/rules.md
                 let candidate = current.join(".goat").join("rules.md");
                 if candidate.exists() {
-                    // 跳过与 #2 重复的文件
+                    let project_rules_canonical = project_rules.canonicalize().ok();
                     let is_duplicate = match (candidate.canonicalize().ok(), &project_rules_canonical) {
                         (Some(a), Some(b)) => a == *b,
                         _ => false,
@@ -177,7 +259,7 @@ impl ReActAgent {
                             rules.push(content);
                         }
                     }
-                    break;
+                    break; // D3: 找到 .goat/rules.md 后停止向上查找
                 }
                 if !current.pop() {
                     break;
@@ -242,6 +324,80 @@ impl ReActAgent {
         skill_map.into_values().map(|(_desc, formatted)| formatted).collect()
     }
 
+    /// D3-T05: 结构化加载 skills — 供前端 Slash 命令 UI 使用。
+    ///
+    /// 返回 `Vec<SkillInfo>`，包含 name/description/source/path，
+    /// 项目级 skill 覆盖全局同名 skill（与 `load_rules` 语义一致）。
+    pub fn load_skills_structured(workspace: &str) -> Vec<SkillInfo> {
+        let mut skill_map: HashMap<String, SkillInfo> = HashMap::new();
+        let ws = std::path::Path::new(workspace);
+
+        fn scan_dir(dir: &std::path::Path, source: &str, map: &mut HashMap<String, SkillInfo>) {
+            let iter = match std::fs::read_dir(dir) {
+                Ok(iter) => iter,
+                Err(_) => return,
+            };
+            for entry in iter.flatten() {
+                let skill_md = entry.path().join("SKILL.md");
+                if !skill_md.exists() {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&skill_md) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if let Some((name, desc, _body)) = parse_skill_frontmatter(&content) {
+                    map.insert(
+                        name.clone(),
+                        SkillInfo {
+                            name,
+                            description: desc,
+                            source: source.to_string(),
+                            path: skill_md.display().to_string(),
+                        },
+                    );
+                }
+            }
+        }
+
+        // 1. 全局 skills
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            let global_dir = std::path::Path::new(&home).join(".goat").join("skills");
+            scan_dir(&global_dir, "global", &mut skill_map);
+        }
+        // 2. 项目 skills（覆盖全局同名）
+        let project_dir = ws.join(".goat").join("skills");
+        scan_dir(&project_dir, "project", &mut skill_map);
+
+        let mut skills: Vec<SkillInfo> = skill_map.into_values().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
+    /// D3-T05: 读取指定 skill 的完整 SKILL.md 内容。
+    ///
+    /// 查找顺序：项目级 → 全局级（与 load_skills_structured 一致）。
+    pub fn read_skill_content(workspace: &str, name: &str) -> Option<String> {
+        let ws = std::path::Path::new(workspace);
+        // 1. 项目级
+        let project_path = ws.join(".goat").join("skills").join(name).join("SKILL.md");
+        if project_path.exists() {
+            return std::fs::read_to_string(&project_path).ok();
+        }
+        // 2. 全局级
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            let global_path = std::path::Path::new(&home)
+                .join(".goat")
+                .join("skills")
+                .join(name)
+                .join("SKILL.md");
+            if global_path.exists() {
+                return std::fs::read_to_string(&global_path).ok();
+            }
+        }
+        None
+    }
+
     /// C4: 持久化事件（fire-and-forget）— 失败仅 warn 不阻断主循环，
     /// 对齐 run_verification_hook 中 `let _ =` 模式。
     async fn persist_event(
@@ -281,7 +437,7 @@ impl ReActAgent {
         workspace: &str,
     ) -> Result<AgentRunResult, AgentError> {
         self.emit(AgentEvent::Started {
-            mode: self.mode.get().to_string(),
+            mode: self.get_mode().to_string(),
             prompt: user_prompt.to_string(),
         }).await;
 
@@ -296,7 +452,7 @@ impl ReActAgent {
         // P0: 自动检测用户 prompt 中的技术栈要求并注入 system prompt
         let tech_stack = extract_tech_stack_constraints(user_prompt);
         let system_prompt = build_system_prompt(
-            self.mode.get(),
+            self.get_mode(),
             workspace,
             &rules,
             &skills,
@@ -897,7 +1053,7 @@ impl ReActAgent {
                         }
                     } else {
                         self.approval.check(
-                            self.mode.get(),
+                            self.get_mode(),
                             &name,
                             category,
                             &arguments,
@@ -912,6 +1068,18 @@ impl ReActAgent {
 
                     match approval.decision {
                         Decision::Allow => {
+                            // 沙箱路径校验
+                            if let Some(denied) = self.check_sandbox_allowed(&name, &arguments) {
+                                self.handle_tool_result(session_id, step, &name, &tool_call.id, &denied).await?;
+                                push_event(&mut events, AgentEvent::ToolResult {
+                                    step,
+                                    tool_name: name.clone(),
+                                    success: false,
+                                    output: denied.output.clone(),
+                                }, self.config.max_events);
+                                consecutive_tool_failures += 1;
+                                continue;
+                            }
                             // 执行工具
                             let result = self.tools.execute(&name, arguments).await;
                             self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
@@ -920,7 +1088,7 @@ impl ReActAgent {
                                 step_has_file_change = true;
 
                                 // Flow 模式运行时审查（对齐 Python main.py mid-flow review）
-                                if self.mode.get() == AgentMode::Flow {
+                                if self.get_mode() == AgentMode::Flow {
                                     let diff = crate::agent::flow::get_git_diff(workspace).await;
                                     if !diff.is_empty() {
                                         let findings = self.run_mid_flow_review(&diff, step).await;
@@ -976,6 +1144,108 @@ impl ReActAgent {
                             }
                         }
                         Decision::Ask => {
+                            // D3-T03: 先检查持久化规则（Always scope 跨会话）
+                            {
+                                let persistent = crate::security::approval::load_persistent_rules(workspace);
+                                if !persistent.is_empty() {
+                                    let args_hash = compute_args_hash(&arguments);
+                                    let matched = persistent.iter().any(|r| {
+                                        r.tool_name == name && (r.args_hash == 0 || r.args_hash == args_hash)
+                                    });
+                                    if matched {
+                                        // 沙箱路径校验
+                                        if let Some(denied) = self.check_sandbox_allowed(&name, &arguments) {
+                                            self.handle_tool_result(session_id, step, &name, &tool_call.id, &denied).await?;
+                                            push_event(&mut events, AgentEvent::ToolResult {
+                                                step,
+                                                tool_name: name.clone(),
+                                                success: false,
+                                                output: denied.output.clone(),
+                                            }, self.config.max_events);
+                                            consecutive_tool_failures += 1;
+                                            continue;
+                                        }
+                                        // 持久化规则命中 — 自动放行（流程与 session_cache 命中一致）
+                                        let result = self.tools.execute(&name, arguments).await;
+                                        self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
+                                        if ToolCallDeduper::is_file_change_tool(&name) {
+                                            step_has_file_change = true;
+                                        }
+                                        push_event(&mut events, AgentEvent::ToolResult {
+                                            step,
+                                            tool_name: name.clone(),
+                                            success: result.success,
+                                            output: result.output.clone(),
+                                        }, self.config.max_events);
+                                        if result.success {
+                                            consecutive_tool_failures = 0;
+                                        } else {
+                                            consecutive_tool_failures += 1;
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // D1-T02: 查询 session_cache — 用户之前选择了 Session/AllSimilar 则自动通过
+                            let cache_hit = {
+                                let cache = self.session_cache.lock().ok();
+                                if let Some(cache) = cache {
+                                    // 先查 AllSimilar（精确匹配 args_hash）
+                                    let exact_key = SessionCacheKey {
+                                        session_id: session_id.to_string(),
+                                        tool_name: name.clone(),
+                                        args_hash: compute_args_hash(&arguments),
+                                    };
+                                    if let Some(dec) = cache.get(&exact_key).copied() {
+                                        Some(dec)
+                                    } else {
+                                        // 再查 Session（通配，args_hash=0）
+                                        let session_key = SessionCacheKey {
+                                            session_id: session_id.to_string(),
+                                            tool_name: name.clone(),
+                                            args_hash: 0,
+                                        };
+                                        cache.get(&session_key).copied()
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some(Decision::Allow) = cache_hit {
+                                // 沙箱路径校验
+                                if let Some(denied) = self.check_sandbox_allowed(&name, &arguments) {
+                                    self.handle_tool_result(session_id, step, &name, &tool_call.id, &denied).await?;
+                                    push_event(&mut events, AgentEvent::ToolResult {
+                                        step,
+                                        tool_name: name.clone(),
+                                        success: false,
+                                        output: denied.output.clone(),
+                                    }, self.config.max_events);
+                                    consecutive_tool_failures += 1;
+                                    continue;
+                                }
+                                // 缓存命中 — 直接执行工具（跳过审批）
+                                let result = self.tools.execute(&name, arguments).await;
+                                self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
+                                if ToolCallDeduper::is_file_change_tool(&name) {
+                                    step_has_file_change = true;
+                                }
+                                push_event(&mut events, AgentEvent::ToolResult {
+                                    step,
+                                    tool_name: name.clone(),
+                                    success: result.success,
+                                    output: result.output.clone(),
+                                }, self.config.max_events);
+                                if result.success {
+                                    consecutive_tool_failures = 0;
+                                } else {
+                                    consecutive_tool_failures += 1;
+                                }
+                                continue;
+                            }
+
                             // ── Blocking approval handshake via oneshot channel ──
                             let (tx, rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
                             *self.approval_responder.lock().await = Some(tx);
@@ -985,6 +1255,19 @@ impl ReActAgent {
                             let summary = format!("Tool '{}' requires approval ({:?})", name, category);
                             let (command, path, url) = extract_tool_context(&name, &arguments);
 
+                            // D1-T02: 计算 danger_score + 生成 diff 预览
+                            let danger_score = calculate_danger_score(category, &name, &arguments, workspace);
+                            let (diff_preview, affected_files) = generate_diff_preview(&name, &arguments, workspace);
+                            let allow_options: Vec<String> = match category {
+                                ToolCategory::Write => vec![
+                                    "once".to_string(), "session".to_string(), "all_similar".to_string(),
+                                ],
+                                ToolCategory::Shell | ToolCategory::Network => vec![
+                                    "once".to_string(), "session".to_string(), "all_similar".to_string(), "always".to_string(),
+                                ],
+                                _ => vec!["once".to_string(), "session".to_string()],
+                            };
+
                             self.emit(AgentEvent::ApprovalRequired {
                                 tool_name: name.clone(),
                                 tool_type,
@@ -993,6 +1276,10 @@ impl ReActAgent {
                                 command,
                                 path,
                                 url,
+                                diff: diff_preview,
+                                affected_files,
+                                allow_options,
+                                danger_score,
                             }).await;
 
                             // M8 P0 修复: 审批期间可被 Ctrl+C 取消
@@ -1003,6 +1290,68 @@ impl ReActAgent {
                                 result = rx => {
                                     match result {
                                         Ok(dec) if dec.approved => {
+                                            // D1-T02: 根据 dec.scope 写入 session_cache — 后续同工具调用自动通过
+                                            match dec.scope {
+                                                ApprovalScope::Always => {
+                                                    // 写入 session_cache（即时生效）
+                                                    // 通配 key（args_hash=0）— 同工具任意参数均命中
+                                                    let key = SessionCacheKey {
+                                                        session_id: session_id.to_string(),
+                                                        tool_name: name.clone(),
+                                                        args_hash: 0,
+                                                    };
+                                                    if let Ok(mut cache) = self.session_cache.lock() {
+                                                        cache.insert(key, Decision::Allow);
+                                                    }
+                                                    // D3-T03: 写入持久化规则（跨会话生效）
+                                                    let mut persistent = crate::security::approval::load_persistent_rules(workspace);
+                                                    if !persistent.iter().any(|r| r.tool_name == name) {
+                                                        persistent.push(crate::security::approval::PersistentApprovalRule {
+                                                            tool_name: name.clone(),
+                                                            args_hash: 0,
+                                                        });
+                                                        crate::security::approval::save_persistent_rules(workspace, &persistent);
+                                                    }
+                                                }
+                                                ApprovalScope::Session => {
+                                                    // 仅 session_cache，不持久化
+                                                    // 通配 key（args_hash=0）— 同工具任意参数均命中
+                                                    let key = SessionCacheKey {
+                                                        session_id: session_id.to_string(),
+                                                        tool_name: name.clone(),
+                                                        args_hash: 0,
+                                                    };
+                                                    if let Ok(mut cache) = self.session_cache.lock() {
+                                                        cache.insert(key, Decision::Allow);
+                                                    }
+                                                }
+                                                ApprovalScope::AllSimilar => {
+                                                    // 精确 key — 同工具同参数才命中
+                                                    let key = SessionCacheKey {
+                                                        session_id: session_id.to_string(),
+                                                        tool_name: name.clone(),
+                                                        args_hash: compute_args_hash(&arguments),
+                                                    };
+                                                    if let Ok(mut cache) = self.session_cache.lock() {
+                                                        cache.insert(key, Decision::Allow);
+                                                    }
+                                                }
+                                                ApprovalScope::Once => {
+                                                    // 不缓存
+                                                }
+                                            }
+                                            // 沙箱路径校验
+                                            if let Some(denied) = self.check_sandbox_allowed(&name, &arguments) {
+                                                self.handle_tool_result(session_id, step, &name, &tool_call.id, &denied).await?;
+                                                push_event(&mut events, AgentEvent::ToolResult {
+                                                    step,
+                                                    tool_name: name.clone(),
+                                                    success: false,
+                                                    output: denied.output.clone(),
+                                                }, self.config.max_events);
+                                                consecutive_tool_failures += 1;
+                                                continue;
+                                            }
                                             // Approved — execute the tool
                                             let result = self.tools.execute(&name, arguments.clone()).await;
                                             self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
@@ -1546,6 +1895,36 @@ impl ReActAgent {
             output: output.clone(),
         }).await;
 
+        // D1-T01: 写工具执行成功后发出 FileChanged 事件（供前端 Changes 面板消费）
+        if result.success {
+            if let (Some(diff), Some(file_path)) = (&result.diff, result.affected_files.first()) {
+                let change_type = result.metadata
+                    .as_ref()
+                    .and_then(|m| m.get("change_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("edit")
+                    .to_string();
+                let old_size = result.metadata
+                    .as_ref()
+                    .and_then(|m| m.get("old_size"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let new_size = result.metadata
+                    .as_ref()
+                    .and_then(|m| m.get("new_size"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                self.emit(AgentEvent::FileChanged {
+                    tool_name: tool_name.to_string(),
+                    file_path: file_path.clone(),
+                    diff: diff.clone(),
+                    old_size,
+                    new_size,
+                    change_type,
+                }).await;
+            }
+        }
+
         Ok(())
     }
 
@@ -1727,6 +2106,7 @@ impl ReActAgent {
             AgentEvent::ContextCompacted { .. } => (EventType::SubAgentSpawned, serde_json::to_value(&event)),
             AgentEvent::ToolFailed { .. } => (EventType::ToolCallResult, serde_json::to_value(&event)),
             AgentEvent::StepCompleted { .. } | AgentEvent::Message { .. } => (EventType::PlanExecuting, serde_json::to_value(&event)),
+            AgentEvent::FileChanged { .. } => (EventType::ToolCallResult, serde_json::to_value(&event)),
         };
         let _ = self.event_bus.emit(event_type, "agent", data.unwrap_or_default());
     }
@@ -2038,6 +2418,17 @@ fn compute_extended_max_steps(
     }
 }
 
+/// D3-T05: 结构化 Skill 信息（供前端 Slash 命令 UI 使用）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// "global" | "project"
+    pub source: String,
+    /// SKILL.md 完整路径
+    pub path: String,
+}
+
 /// 解析 SKILL.md 的 frontmatter 头部
 ///
 /// 格式：
@@ -2088,6 +2479,81 @@ fn risk_level_from_category(category: ToolCategory) -> String {
         ToolCategory::Mcp | ToolCategory::Agent => "MEDIUM".to_string(),
         ToolCategory::Read | ToolCategory::Interactive => "LOW".to_string(),
     }
+}
+
+/// D1-T02: 为写工具生成 diff 预览（审批弹窗展示用）
+///
+/// 仅对 edit_file/write_file 生成 unified diff 预览，其他工具返回 (None, [])。
+fn generate_diff_preview(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workspace: &str,
+) -> (Option<String>, Vec<String>) {
+    use similar::{ChangeTag, TextDiff};
+
+    let file_path = match arguments.get("file_path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return (None, vec![]),
+    };
+
+    // 只为写工具生成 diff 预览
+    if tool_name != "edit_file" && tool_name != "write_file" {
+        return (None, vec![]);
+    }
+
+    let abs_path = crate::core::paths::safe_path(file_path, std::path::Path::new(workspace));
+    let old_content = std::fs::read_to_string(&abs_path).unwrap_or_default();
+
+    let new_content = if tool_name == "write_file" {
+        arguments.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        // edit_file — 预览时只替换第一个匹配（与执行时 replace_all=false 行为一致）
+        let old_string = arguments.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+        let new_string = arguments.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+        if old_string.is_empty() {
+            return (None, vec![]);
+        }
+        old_content.replacen(old_string, new_string, 1)
+    };
+
+    if old_content == new_content {
+        return (None, vec![]);
+    }
+
+    let rel_path = abs_path.strip_prefix(workspace)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| file_path.to_string());
+
+    let diff = TextDiff::from_lines(&old_content, &new_content);
+    let mut output = String::new();
+    output.push_str(&format!("--- a/{}\n", rel_path));
+    output.push_str(&format!("+++ b/{}\n", rel_path));
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => ' ',
+        };
+        output.push(sign);
+        output.push_str(change.value());
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    (Some(output), vec![rel_path])
+}
+
+/// D1-T02: 计算参数 hash（用于 session_cache 键匹配）
+fn compute_args_hash(arguments: &serde_json::Value) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    arguments.to_string().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Extract tool-specific context fields from arguments

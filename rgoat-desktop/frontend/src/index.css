@@ -4,23 +4,123 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --bg: #0a0a0a;
-  --surface: #1a1a1a;
-  --surface-light: #2a2a2a;
-  --primary: #e94560;
-  --text: #e0e0e0;
-  --text-muted: #888;
-  --success: #4ecca3;
-  --warning: #f0c040;
-  --error: #e94560;
-  --border: #333;
+@font-face {
+  font-family: "Inter";
+  src: local("Inter"), local("Inter-Regular");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: local("JetBrains Mono"), local("JetBrainsMono-Regular");
+  font-display: swap;
+}
+
+:root,
+.dark {
+  /* 背景 */
+  --bg: #0c0c0c;
+  --bg-elevated: #111111;
+  --surface: #151515;
+  --surface-hover: #1f1f1f;
+  --surface-active: #27272a;
+
+  /* 文字 */
+  --text: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #71717a;
+  --text-on-brand: #ffffff;
+  --text-brand: #818cf8;
+  --text-brand-hover: #a5b4fc;
+
+  /* 边框与分隔 */
+  --border: #27272a;
+  --border-strong: #3f3f46;
+  --divider: rgba(255, 255, 255, 0.08);
+
+  /* 品牌/强调 */
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --primary-active: #4f46e5;
+  --primary-subtle: rgba(99, 102, 241, 0.12);
+
+  /* 次级强调：Agent 运行态/流式指示 */
+  --accent-signal: #22d3ee;
+  --accent-signal-subtle: rgba(34, 211, 238, 0.12);
+
+  /* 语义色 */
+  --success: #22c55e;
+  --success-subtle: rgba(34, 197, 94, 0.12);
+  --warning: #f59e0b;
+  --warning-subtle: rgba(245, 158, 11, 0.12);
+  --error: #ef4444;
+  --error-subtle: rgba(239, 68, 68, 0.12);
+  --info: #38bdf8;
+
+  /* 间距 */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* 焦点环 */
+  --ring: rgba(129, 140, 248, 0.55);
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.36);
+}
+
+.light {
+  --bg: #ffffff;
+  --bg-elevated: #fafafa;
+  --surface: #f4f4f5;
+  --surface-hover: #e4e4e7;
+  --surface-active: #d4d4d8;
+  --text: #18181b;
+  --text-secondary: #52525b;
+  --text-tertiary: #a1a1aa;
+  --text-on-brand: #ffffff;
+  --text-brand: #4f46e5;
+  --text-brand-hover: #4338ca;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --divider: rgba(0, 0, 0, 0.06);
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-active: #3730a3;
+  --primary-subtle: rgba(79, 70, 229, 0.10);
+  --accent-signal: #0891b2;
+  --accent-signal-subtle: rgba(8, 145, 178, 0.10);
+  --success: #16a34a;
+  --success-subtle: rgba(22, 163, 74, 0.10);
+  --warning: #d97706;
+  --warning-subtle: rgba(217, 119, 6, 0.10);
+  --error: #dc2626;
+  --error-subtle: rgba(220, 38, 38, 0.10);
+  --info: #0284c7;
+
+  --ring: rgba(79, 70, 229, 0.45);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.14);
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", "PingFang SC", "Inter", sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   margin: 0;
   padding: 0;
   overflow: hidden;
@@ -31,14 +131,42 @@ body {
   height: 100vh;
 }
 
+code,
+.font-mono {
+  font-family: ui-monospace, "SF Mono", "Fira Code", "JetBrains Mono", monospace;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: var(--surface);
 }
+
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: var(--border-strong);
   border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

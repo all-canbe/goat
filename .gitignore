@@ -26,3 +26,13 @@ dist/
 
 # RGoat runtime data
 .goat/
+
+# Non-Rust subprojects (backup)
+color-palette-generator/
+pomodoro-timer/
+
+# Change docs (not part of source)
+openspec/
+
+# WorkBuddy metadata
+.workbuddy/

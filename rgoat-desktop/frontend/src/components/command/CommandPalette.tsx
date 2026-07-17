@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Search, Command } from "lucide-react";
+import { Search, Command, Settings, type LucideIcon } from "lucide-react";
 
 interface CommandItem {
   id: string;
   label: string;
   category: string;
+  icon?: LucideIcon;
   action: () => void;
 }
 
@@ -14,6 +15,7 @@ interface CommandPaletteProps {
   onModeChange?: (mode: string) => void;
   onNewSession?: () => void;
   onClearMessages?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export default function CommandPalette({
@@ -22,6 +24,7 @@ export default function CommandPalette({
   onModeChange,
   onNewSession,
   onClearMessages,
+  onOpenSettings,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -92,8 +95,18 @@ export default function CommandPalette({
           onClose();
         },
       },
+      {
+        id: "open-settings",
+        label: "Open Settings",
+        category: "Settings",
+        icon: Settings,
+        action: () => {
+          onOpenSettings?.();
+          onClose();
+        },
+      },
     ],
-    [onClose, onModeChange, onNewSession, onClearMessages]
+    [onClose, onModeChange, onNewSession, onClearMessages, onOpenSettings]
   );
 
   const filtered = useMemo(() => {
@@ -161,7 +174,7 @@ export default function CommandPalette({
     return (
       <>
         {text.slice(0, idx)}
-        <span className="text-primary font-bold">{text.slice(idx, idx + searchQuery.length)}</span>
+        <span className="text-brand font-bold">{text.slice(idx, idx + searchQuery.length)}</span>
         {text.slice(idx + searchQuery.length)}
       </>
     );
@@ -176,17 +189,17 @@ export default function CommandPalette({
       <div className="bg-surface border border-border rounded-lg shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
         {/* Search input */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
-          <Search size={16} className="text-textMuted shrink-0" />
+          <Search size={16} className="text-text-secondary shrink-0" />
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-textMuted"
+            className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-tertiary"
             placeholder="Type a command..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
           />
-          <kbd className="text-[10px] text-textMuted bg-bg px-1.5 py-0.5 rounded border border-border hidden sm:inline-block">
+          <kbd className="text-[10px] text-text-secondary bg-bg px-1.5 py-0.5 rounded border border-border hidden sm:inline-block">
             ESC
           </kbd>
         </div>
@@ -194,37 +207,40 @@ export default function CommandPalette({
         {/* Results */}
         <div className="max-h-[320px] overflow-y-auto py-1">
           {filtered.length === 0 ? (
-            <div className="px-4 py-6 text-center text-textMuted text-xs">
+            <div className="px-4 py-6 text-center text-text-secondary text-xs">
               No commands found
             </div>
           ) : (
-            filtered.map((cmd, idx) => (
-              <button
-                key={cmd.id}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                  idx === selectedIndex
-                    ? "bg-primary/10 text-primary"
-                    : "text-text hover:bg-surfaceLight"
-                }`}
-                onClick={cmd.action}
-                onMouseEnter={() => setSelectedIndex(idx)}
-              >
-                <Command size={14} className="shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm truncate">
-                    {highlightMatch(cmd.label, query)}
+            filtered.map((cmd, idx) => {
+              const Icon = cmd.icon || Command;
+              return (
+                <button
+                  key={cmd.id}
+                  className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                    idx === selectedIndex
+                      ? "bg-primary-subtle text-brand"
+                      : "text-text hover:bg-surface-hover"
+                  }`}
+                  onClick={cmd.action}
+                  onMouseEnter={() => setSelectedIndex(idx)}
+                >
+                  <Icon size={14} className="shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm truncate">
+                      {highlightMatch(cmd.label, query)}
+                    </div>
                   </div>
-                </div>
-                <span className="text-[10px] text-textMuted shrink-0">
-                  {cmd.category}
-                </span>
-              </button>
-            ))
+                  <span className="text-[10px] text-text-secondary shrink-0">
+                    {cmd.category}
+                  </span>
+                </button>
+              );
+            })
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-[10px] text-textMuted">
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-[10px] text-text-secondary">
           <span>
             <kbd className="bg-bg px-1 py-0.5 rounded border border-border text-[9px]">↑↓</kbd> Navigate
           </span>

@@ -52,7 +52,7 @@ export default function SetupScreen() {
             <Zap size={28} className="text-white" />
           </div>
           <h1 className="text-xl font-bold text-text">RGoat Desktop</h1>
-          <p className="text-sm text-textMuted mt-1">
+          <p className="text-sm text-text-secondary mt-1">
             Configure your first AI provider to get started
           </p>
         </div>
@@ -64,7 +64,7 @@ export default function SetupScreen() {
         >
           {/* Base URL */}
           <div>
-            <label className="flex items-center gap-1.5 text-xs font-medium text-textMuted mb-1.5">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary mb-1.5">
               <Globe size={12} />
               Base URL
             </label>
@@ -79,7 +79,7 @@ export default function SetupScreen() {
 
           {/* API Key */}
           <div>
-            <label className="flex items-center gap-1.5 text-xs font-medium text-textMuted mb-1.5">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary mb-1.5">
               <Key size={12} />
               API Key
             </label>
@@ -94,7 +94,7 @@ export default function SetupScreen() {
 
           {/* Model Name */}
           <div>
-            <label className="flex items-center gap-1.5 text-xs font-medium text-textMuted mb-1.5">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary mb-1.5">
               <Cpu size={12} />
               Model Name
             </label>
@@ -109,7 +109,7 @@ export default function SetupScreen() {
 
           {/* Provider Name */}
           <div>
-            <label className="flex items-center gap-1.5 text-xs font-medium text-textMuted mb-1.5">
+            <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary mb-1.5">
               <Tag size={12} />
               Provider Name
             </label>
@@ -123,14 +123,14 @@ export default function SetupScreen() {
           </div>
 
           {/* Provider type indicator */}
-          <div className="text-xs text-textMuted">
+          <div className="text-xs text-text-secondary">
             Detected type:{" "}
-            <span className="text-primary font-medium">{providerType}</span>
+            <span className="text-brand font-medium">{providerType}</span>
           </div>
 
           {/* Error */}
           {error && (
-            <div className="text-xs text-error bg-error/10 rounded-md px-3 py-2">
+            <div className="text-xs text-error bg-error-subtle rounded-md px-3 py-2">
               {error}
             </div>
           )}

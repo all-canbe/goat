@@ -15,6 +15,7 @@ use std::collections::HashSet;
 // ============================================================================
 
 /// Agent 运行模式
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentMode {
     /// 默认模式：需要确认写入/执行操作
@@ -319,13 +320,45 @@ impl Default for ApprovalEngine {
 // 审批决策与通道类型
 // ============================================================================
 
+/// D1-T02: 批准范围 — 控制后续同类工具调用是否免审批
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScope {
+    /// 仅本次批准
+    Once,
+    /// 本会话内同工具自动通过
+    Session,
+    /// 本会话内同工具+同类别参数自动通过
+    AllSimilar,
+    /// 永久允许（持久化到 settings.json 白名单）
+    Always,
+}
+
+impl Default for ApprovalScope {
+    fn default() -> Self {
+        Self::Once
+    }
+}
+
 /// 用户审批决策
 #[derive(Debug, Clone)]
 pub struct ApprovalDecision {
     /// 是否批准该次工具调用
     pub approved: bool,
-    /// 是否批准后续所有同类工具调用（免审批）
+    /// 是否批准后续所有同类工具调用（免审批）— deprecated，保留兼容
     pub approve_all: bool,
+    /// D1-T02: 批准范围
+    pub scope: ApprovalScope,
+}
+
+impl Default for ApprovalDecision {
+    fn default() -> Self {
+        Self {
+            approved: false,
+            approve_all: false,
+            scope: ApprovalScope::Once,
+        }
+    }
 }
 
 /// Agent 与 TUI 之间的审批通道
@@ -335,3 +368,125 @@ pub struct ApprovalDecision {
 pub type ApprovalResponder = std::sync::Arc<
     tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<ApprovalDecision>>>,
 >;
+
+// ============================================================================
+// D1-T02: 会话级审批缓存 + danger_score 计算
+// ============================================================================
+
+/// 会话缓存键 — 用于 session_cache 自动批准匹配
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionCacheKey {
+    pub session_id: String,
+    pub tool_name: String,
+    /// 关键参数的 hash（同工具+同参数匹配）
+    pub args_hash: u64,
+}
+
+/// D1-T02: danger_score 计算 — 基于路径/命令/工具类别的规则打分（0-100）
+///
+/// 规则：
+/// - 路径包含 `.env`/`secrets`/`.ssh`/`.git` → +40
+/// - 路径在 workspace 外 → +30
+/// - Shell 命令包含 `rm`/`del`/`format`/`shutdown` → +50
+/// - Shell 命令包含 `sudo`/`>`/`|` → +20
+/// - 工具类别 Destructive → +60
+/// - 基础分：Read=0, Write=20, Shell=30, Network=10, 其他=10
+pub fn calculate_danger_score(
+    category: ToolCategory,
+    tool_name: &str,
+    args: &serde_json::Value,
+    workspace: &str,
+) -> u8 {
+    let mut score: u32 = 0;
+
+    // 基础分（按类别）
+    score += match category {
+        ToolCategory::Read => 0,
+        ToolCategory::Write => 20,
+        ToolCategory::Shell => 30,
+        ToolCategory::Network => 10,
+        ToolCategory::Destructive => 60,
+        ToolCategory::Mcp | ToolCategory::Agent | ToolCategory::Interactive => 10,
+    };
+
+    // 路径检查
+    let path_str = args.get("file_path")
+        .or_else(|| args.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !path_str.is_empty() {
+        let lower = path_str.to_lowercase();
+        if lower.contains(".env") || lower.contains("secrets") || lower.contains(".ssh") || lower.contains(".git") {
+            score += 40;
+        }
+        // 路径在 workspace 外
+        if !path_str.starts_with(workspace) && !std::path::Path::new(path_str).starts_with(workspace) {
+            score += 30;
+        }
+    }
+
+    // Shell 命令检查
+    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+        let lower = cmd.to_lowercase();
+        let dangerous = ["rm ", "rm/", "del ", "format ", "shutdown", "rmdir"];
+        if dangerous.iter().any(|d| lower.contains(d)) || lower.trim_end() == "rm" || lower.trim_end() == "del" {
+            score += 50;
+        }
+        if lower.contains("sudo") || lower.contains('>') || lower.contains('|') {
+            score += 20;
+        }
+    }
+
+    // URL 检查（网络工具）
+    if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+        if url.starts_with("http://") {
+            score += 15; // 非 HTTPS 加分
+        }
+    }
+
+    // 绕过免疫工具额外加分
+    let immune = ["rm", "rmdir", "del", "format", "shutdown"];
+    if immune.contains(&tool_name) {
+        score += 30;
+    }
+
+    score.min(100) as u8
+}
+
+// ============================================================================
+// D3-T03: Always scope 跨会话持久化
+// ============================================================================
+
+/// 持久化的审批规则（Always scope）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistentApprovalRule {
+    /// 工具名（如 "write_file"）
+    pub tool_name: String,
+    /// 参数哈希（0 = 通配，任意参数都允许）
+    #[serde(default)]
+    pub args_hash: u64,
+}
+
+/// D3-T03: 从 <workspace>/.goat/approval_rules.json 加载持久化规则
+pub fn load_persistent_rules(workspace: &str) -> Vec<PersistentApprovalRule> {
+    let path = std::path::Path::new(workspace)
+        .join(".goat")
+        .join("approval_rules.json");
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<Vec<PersistentApprovalRule>>(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// D3-T03: 保存持久化规则到 <workspace>/.goat/approval_rules.json
+pub fn save_persistent_rules(workspace: &str, rules: &[PersistentApprovalRule]) {
+    let dir = std::path::Path::new(workspace).join(".goat");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("approval_rules.json");
+    if let Ok(json) = serde_json::to_string_pretty(rules) {
+        let _ = std::fs::write(&path, json);
+    }
+}

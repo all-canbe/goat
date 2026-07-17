@@ -14,34 +14,31 @@ function CodeBlock({ children, className }: { children?: React.ReactNode; classN
   const [copied, setCopied] = useState(false);
   const code = String(children || "").replace(/\n$/, "");
 
+  // P1: 代码块复制按钮 — 1.5s 后恢复 Copy 图标
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(code).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), 1500);
     });
   }, [code]);
 
+  // P1: 右上角悬浮复制按钮（hover 显示），点击复制到剪贴板
   return (
     <div className="relative group my-2">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#161b22] rounded-t-md border-b border-border/30">
-        <span className="text-xs text-textMuted font-mono">
-          {className ? className.replace("language-", "") : "code"}
-        </span>
-        <button
-          onClick={handleCopy}
-          className="text-textMuted hover:text-text transition-colors"
-          title="Copy code"
-        >
-          {copied ? (
-            <Check size={14} className="text-success" />
-          ) : (
-            <Copy size={14} />
-          )}
-        </button>
-      </div>
-      <pre className="bg-[#0d1117] rounded-b-md overflow-x-auto p-3">
+      <pre className="bg-bg-elevated rounded-md overflow-x-auto p-3 pr-10">
         <code className={className}>{children}</code>
       </pre>
+      <button
+        onClick={handleCopy}
+        title="Copy code"
+        className="absolute top-1.5 right-1.5 p-1 rounded text-text-secondary hover:text-text hover:bg-surface-hover opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        {copied ? (
+          <Check size={14} className="text-success" />
+        ) : (
+          <Copy size={14} />
+        )}
+      </button>
     </div>
   );
 }
@@ -76,7 +73,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                     return <CodeBlock className={className}>{children}</CodeBlock>;
                   }
                   return (
-                    <code className="bg-surfaceLight px-1.5 py-0.5 rounded text-xs font-mono text-warning">
+                    <code className="bg-surface-hover px-1.5 py-0.5 rounded text-xs font-mono text-warning">
                       {children}
                     </code>
                   );
@@ -107,7 +104,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     case "system":
       return (
         <div className="flex justify-center mb-1">
-          <span className="text-xs text-textMuted px-2 py-0.5">
+          <span className="text-xs text-text-secondary px-2 py-0.5">
             {message.content}
           </span>
         </div>

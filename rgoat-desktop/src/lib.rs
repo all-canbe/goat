@@ -25,7 +25,7 @@ use rgoat_core::core::event_bus::EventBus;
 use rgoat_core::core::workspace::resolve_workspace;
 use rgoat_core::memory::vector_store::VectorMemory;
 use rgoat_core::provider::switch::ProviderSwitch;
-use rgoat_core::security::approval::{AgentMode, ApprovalEngine, ApprovalResponder};
+use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder};
 use rgoat_core::tools::registry::ToolRegistry;
 
 /// Application state shared across all Tauri commands
@@ -45,13 +45,28 @@ pub struct AppState {
     pub agent_paused: Arc<AtomicBool>,
     /// Handle to the currently running agent task
     pub agent_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// D1-T03: 会话内文件变更记录 — session_id → changes
+    pub session_changes: Arc<Mutex<HashMap<String, Vec<FileChangeRecord>>>>,
 }
 
 /// Represents a pending approval request awaiting frontend response
 pub struct PendingApproval {
     pub tool_name: String,
     pub args: serde_json::Value,
-    pub sender: tokio::sync::oneshot::Sender<bool>,
+    /// D1-T03: 改为携带完整 ApprovalDecision（含 scope）而非 bool
+    pub sender: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
+/// D1-T03: 单个文件变更记录（前端 invoke add_session_change 时序列化）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileChangeRecord {
+    pub file_path: String,
+    pub change_type: String, // "create" | "edit" | "delete"
+    pub diff: String,
+    pub tool_name: String,
+    pub timestamp: String,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -139,6 +154,13 @@ pub fn run() {
             commands::resume_agent,
             commands::get_agent_status,
             commands::respond_ask_user,
+            // D1-T03: 会话变更管理
+            commands::get_session_changes,
+            commands::clear_session_changes,
+            commands::add_session_change,
+            // D3-T05: Skill 系统
+            commands::list_skills,
+            commands::read_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -205,6 +227,7 @@ async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::erro
             agent_cancellation,
             agent_paused,
             agent_handle: Arc::new(Mutex::new(None)),
+            session_changes: Arc::new(Mutex::new(HashMap::new())),
         },
         event_bus,
     ))

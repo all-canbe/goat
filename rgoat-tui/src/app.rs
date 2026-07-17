@@ -43,7 +43,7 @@ use rgoat_core::core::cancellation::CancellationToken;
 use rgoat_core::core::event_bus::Event as BusEvent;
 use rgoat_core::provider::switch::ProviderSwitch;
 use rgoat_core::provider::provider::LlmProvider;
-use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalResponder};
+use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalResponder, ApprovalScope};
 
 use crate::components::approval_dialog::{ApprovalChoice, ApprovalDialog, ApprovalRequest};
 
@@ -1737,12 +1737,14 @@ impl App {
                 command,
                 path,
                 url,
+                ..
             } => {
                 // In YOLO mode: auto-approve all tool calls without dialog
                 if self.mode == AgentMode::Yolo {
                     let decision = ApprovalDecision {
                         approved: true,
                         approve_all: true,
+                        scope: ApprovalScope::Session,
                     };
                     // Send decision back through the oneshot channel
                     if let Ok(mut guard) = self.approval_responder.try_lock() {
@@ -1802,6 +1804,9 @@ impl App {
                 self.add_line(UiElement::System {
                     text: format!("✗ {} failed{}: {}", tool_name, hint, short_error),
                 });
+            }
+            AgentEvent::FileChanged { .. } => {
+                // D1-T01: TUI 暂不处理文件变更事件（桌面端 Changes 面板消费）
             }
         }
     }
@@ -2035,18 +2040,21 @@ async fn run_event_loop(
                                     Some(ApprovalDecision {
                                         approved: true,
                                         approve_all: false,
+                                        scope: ApprovalScope::Once,
                                     })
                                 }
                                 KeyCode::Char('a') | KeyCode::Char('A') => {
                                     Some(ApprovalDecision {
                                         approved: true,
                                         approve_all: true,
+                                        scope: ApprovalScope::Session,
                                     })
                                 }
                                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                     Some(ApprovalDecision {
                                         approved: false,
                                         approve_all: false,
+                                        scope: ApprovalScope::Once,
                                     })
                                 }
                                 _ => None,

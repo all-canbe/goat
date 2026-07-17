@@ -111,6 +111,18 @@ pub enum AgentEvent {
         /// Network 工具专用
         #[serde(skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        /// D1-T02: 写工具的 diff 预览
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
+        /// D1-T02: 受影响文件列表
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        affected_files: Vec<String>,
+        /// D1-T02: 允许的批准范围选项 ["once", "session", "all_similar", "always"]
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        allow_options: Vec<String>,
+        /// D1-T02: 危险分数 0-100
+        #[serde(default)]
+        danger_score: u8,
     },
     /// 上下文压缩完成（M6: 防上下文溢出）
     ContextCompacted {
@@ -125,6 +137,16 @@ pub enum AgentEvent {
         error: String,
         /// "retryable"(网络/超时), "argument"(无效参数), "fatal"(其他)
         failure_type: String,
+    },
+    /// D1-T01: 文件变更事件（写工具执行成功后发出，供前端 Changes 面板消费）
+    FileChanged {
+        tool_name: String,
+        file_path: String,
+        diff: String,
+        old_size: usize,
+        new_size: usize,
+        /// "create" | "edit" | "delete"
+        change_type: String,
     },
 }
 

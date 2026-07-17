@@ -26,27 +26,27 @@ const EXTENSION_COLORS: Record<string, string> = {
   html: "text-red-400",
   md: "text-purple-400",
   svg: "text-pink-400",
-  lock: "text-textMuted",
-  gitignore: "text-textMuted",
+  lock: "text-text-secondary",
+  gitignore: "text-text-secondary",
   yml: "text-yellow-300",
   yaml: "text-yellow-300",
 };
 
 function getExtensionColor(filename: string): string {
   const parts = filename.split(".");
-  if (parts.length < 2) return "text-textMuted";
+  if (parts.length < 2) return "text-text-secondary";
 
   // Check special filenames
   const fullLower = filename.toLowerCase();
   if (fullLower === "package-lock.json" || fullLower === "yarn.lock" || fullLower === "cargo.lock") {
-    return EXTENSION_COLORS["lock"] || "text-textMuted";
+    return EXTENSION_COLORS["lock"] || "text-text-secondary";
   }
   if (fullLower === ".gitignore") {
-    return EXTENSION_COLORS["gitignore"] || "text-textMuted";
+    return EXTENSION_COLORS["gitignore"] || "text-text-secondary";
   }
 
   const ext = parts[parts.length - 1].toLowerCase();
-  return EXTENSION_COLORS[ext] || "text-textMuted";
+  return EXTENSION_COLORS[ext] || "text-text-secondary";
 }
 
 interface TreeNodeProps {
@@ -69,7 +69,7 @@ function TreeNode({ node, depth, max_depth }: TreeNodeProps) {
   return (
     <div>
       <div
-        className={`flex items-center gap-1 px-2 py-1 cursor-pointer rounded text-xs hover:bg-surfaceLight transition-colors ${
+        className={`flex items-center gap-1 px-2 py-1 cursor-pointer rounded text-xs hover:bg-surface-hover transition-colors ${
           depth === 0 ? "" : ""
         }`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -78,7 +78,7 @@ function TreeNode({ node, depth, max_depth }: TreeNodeProps) {
         {/* Expand/collapse icon */}
         {node.is_dir ? (
           <>
-            <span className="shrink-0 text-textMuted">
+            <span className="shrink-0 text-text-secondary">
               {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
             </span>
             <span className="shrink-0 text-yellow-300">
@@ -151,7 +151,7 @@ export default function FileTree({ max_depth = 3 }: FileTreeProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-8 text-textMuted">
+      <div className="flex items-center justify-center py-8 text-text-secondary">
         <Loader2 size={16} className="animate-spin mr-2" />
         <span className="text-xs">Loading files...</span>
       </div>
@@ -168,7 +168,7 @@ export default function FileTree({ max_depth = 3 }: FileTreeProps) {
 
   if (tree.length === 0) {
     return (
-      <div className="flex items-center justify-center py-8 text-textMuted">
+      <div className="flex items-center justify-center py-8 text-text-secondary">
         <span className="text-xs">No files</span>
       </div>
     );

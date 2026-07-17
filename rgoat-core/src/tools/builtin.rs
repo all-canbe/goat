@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +20,45 @@ use crate::agent::subagent::SubAgentRuntime;
 use crate::core::cancellation::CancellationToken;
 use crate::core::event_bus::EventBus;
 use crate::security::approval::ToolCategory;
+
+// ============================================================================
+// D1-T01: diff 生成辅助
+// ============================================================================
+
+/// 生成 unified diff 格式字符串。
+///
+/// 输入旧/新文本与展示用文件路径，返回 `--- a/<path>\n+++ b/<path>\n` 开头的 diff。
+/// 若 old == new 返回空字符串。
+fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
+    if old == new {
+        return String::new();
+    }
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    output.push_str(&format!("--- a/{}\n", file_path));
+    output.push_str(&format!("+++ b/{}\n", file_path));
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => ' ',
+        };
+        output.push(sign);
+        output.push_str(change.value());
+        // 最后一行可能无换行符，补齐以保证 diff 行对齐
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+/// 将绝对路径转为相对 workspace 的路径字符串（用于 diff 头部展示）。
+fn relative_path_str(path: &std::path::Path, workspace: &std::path::Path) -> String {
+    path.strip_prefix(workspace)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string())
+}
 
 /// Result of `create_builtin_tools` — the tool list plus an optional
 /// handle to the AskUserTool's pending-requests map for desktop IPC.
@@ -194,8 +234,27 @@ impl Tool for WriteFileTool {
             }
         }
 
+        // D1-T01: 写入前捕获旧内容以生成 diff
+        let old_content = std::fs::read_to_string(&path).unwrap_or_default();
+        let is_new_file = !path.exists();
+
         match std::fs::write(&path, content) {
-            Ok(_) => ToolResult::success(format!("Successfully wrote to {}", file_path)),
+            Ok(_) => {
+                let rel_path = relative_path_str(&path, &self.workspace);
+                let diff = generate_unified_diff(&old_content, content, &rel_path);
+                let change_type = if is_new_file { "create" } else { "edit" };
+                let affected = vec![rel_path];
+                ToolResult::success(format!(
+                    "Successfully wrote to {} ({})",
+                    file_path, change_type
+                ))
+                .with_diff(diff, affected)
+                .with_metadata(json!({
+                    "change_type": change_type,
+                    "old_size": old_content.len(),
+                    "new_size": content.len(),
+                }))
+            }
             Err(e) => ToolResult::error(
                 format!("Failed to write file: {}", e),
                 format!("{}", e),
@@ -299,10 +358,24 @@ impl Tool for EditFileTool {
         };
 
         match std::fs::write(&path, &new_content) {
-            Ok(_) => ToolResult::success(format!(
-                "Successfully edited {}. Replaced {} occurrence(s).",
-                file_path, if replace_all { occurrences } else { 1 }
-            )),
+            Ok(_) => {
+                // D1-T01: 生成 unified diff
+                let rel_path = relative_path_str(&path, &self.workspace);
+                let diff = generate_unified_diff(&content, &new_content, &rel_path);
+                let affected = vec![rel_path];
+                ToolResult::success(format!(
+                    "Successfully edited {}. Replaced {} occurrence(s).",
+                    file_path,
+                    if replace_all { occurrences } else { 1 }
+                ))
+                .with_diff(diff, affected)
+                .with_metadata(json!({
+                    "change_type": "edit",
+                    "old_size": content.len(),
+                    "new_size": new_content.len(),
+                    "occurrences_replaced": if replace_all { occurrences } else { 1 },
+                }))
+            }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e), format!("{}", e)),
         }
     }

@@ -198,7 +198,12 @@ async fn build_test_agent(
         context_window: 128_000,
         max_steps_extend_limit: 2,
         no_progress_step_limit: 15,
+        max_events: 2000,
+        max_history_messages: 200,
         planning_enabled: false,
+        task_persistence_enabled: false, // D1-T08: 测试不写 tasks.jsonl
+        watchdog_timeout_secs: 300,
+        checkpoint_interval_steps: 10,
     };
 
     let agent = Arc::new(ReActAgent::new(

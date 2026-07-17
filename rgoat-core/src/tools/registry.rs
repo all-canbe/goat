@@ -17,6 +17,12 @@ pub struct ToolResult {
     pub output: String,
     pub error: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    /// D1-T01: 文件变更的 unified diff（仅写工具填充）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// D1-T01: 受影响文件相对路径列表（仅写工具填充）
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub affected_files: Vec<String>,
 }
 
 impl ToolResult {
@@ -26,6 +32,8 @@ impl ToolResult {
             output: output.into(),
             error: None,
             metadata: None,
+            diff: None,
+            affected_files: Vec::new(),
         }
     }
 
@@ -35,11 +43,20 @@ impl ToolResult {
             output: output.into(),
             error: Some(error.into()),
             metadata: None,
+            diff: None,
+            affected_files: Vec::new(),
         }
     }
 
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// D1-T01: 附带 diff 与受影响文件（builder 风格）
+    pub fn with_diff(mut self, diff: impl Into<String>, affected_files: Vec<String>) -> Self {
+        self.diff = Some(diff.into());
+        self.affected_files = affected_files;
         self
     }
 }

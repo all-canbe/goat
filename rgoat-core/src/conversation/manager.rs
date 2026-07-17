@@ -8,7 +8,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::core::workspace::get_data_dir;
@@ -56,8 +57,26 @@ pub struct ConversationManager {
 }
 
 impl ConversationManager {
-    /// 创建管理器并初始化数据库（默认路径：%APPDATA%/goat/conversations.db）
+    /// 创建管理器并初始化数据库（默认路径：工作区/.goat/conversations.db）
     pub async fn new() -> Result<Self, ConversationError> {
+        // 优先使用工作区目录（兼容沙箱限制）
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let workspace_db = if !cwd.as_os_str().is_empty() {
+            let dir = cwd.join(".goat");
+            std::fs::create_dir_all(&dir).ok();
+            Some(dir.join("conversations.db"))
+        } else {
+            None
+        };
+
+        // 尝试工作区路径，回退到 data_dir
+        if let Some(db) = &workspace_db {
+            let result = Self::new_with_path(db).await;
+            if result.is_ok() {
+                return result;
+            }
+        }
+
         let db_path = get_data_dir().join("conversations.db");
         Self::new_with_path(&db_path).await
     }
@@ -69,9 +88,17 @@ impl ConversationManager {
             std::fs::create_dir_all(parent)?;
         }
 
+        // 使用 sqlite:/// URI + create_if_missing（避免 ?mode=rwc 不被 sqlx 支持）
+        let uri = format!(
+            "sqlite:///{}",
+            db_path.display().to_string().replace('\\', "/")
+        );
+        let opts = SqliteConnectOptions::from_str(&uri)
+            .unwrap_or_else(|_| SqliteConnectOptions::new().filename(":memory:"))
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(&format!("sqlite:{}?mode=rwc", db_path.display()))
+            .connect_with(opts)
             .await?;
 
         // Create tables

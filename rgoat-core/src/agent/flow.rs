@@ -225,8 +225,8 @@ impl FlowPipeline {
     ) -> Result<FlowResult, AgentError> {
         info!("Starting Flow pipeline for session {}", session_id);
 
-        // 加载项目上下文
-        let project_ctx = load_project_context(workspace);
+        // D3: 复用 load_rules，避免与 implement_agent.run 内部 load_rules 重复加载
+        let project_ctx = ReActAgent::load_rules(workspace).join("\n\n");
 
         // 第一轮：实现
         self.emit_thought(0, "[1] Implementation phase starting...").await;
@@ -580,7 +580,8 @@ impl FlowPipeline {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let project_ctx = load_project_context(workspace);
+        // D3-T01b: 复用 load_rules，避免与 implement_agent.run 内部 load_rules 重复加载
+        let project_ctx = ReActAgent::load_rules(workspace).join("\n\n");
         let fix_prompt = format!(
             "## Original Task\n{}\n\n## Review Findings to Fix\n{}\n\n{}Fix each issue above by editing the affected files.",
             task,
@@ -1033,22 +1034,6 @@ pub fn parse_ac_results(output: &str, ac_count: usize) -> Vec<bool> {
         return vec![false; ac_count];
     }
     results.into_iter().take(ac_count).collect::<Vec<_>>()
-}
-
-/// 加载项目上下文文件
-pub fn load_project_context(workspace: &str) -> String {
-    let ws = Path::new(workspace);
-    for fname in &["CLAUDE.md", "goat.md", "AGENTS.md"] {
-        let path = ws.join(fname);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            return format!(
-                "\n## Project Context ({})\n{}\n",
-                fname,
-                &content[..content.len().min(2000)]
-            );
-        }
-    }
-    String::new()
 }
 
 /// 从 LLM 响应中提取计划

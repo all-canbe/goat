@@ -15,6 +15,28 @@ interface ToolCallCardProps {
   output?: string;
 }
 
+// D1-T07: 从工具名推断风险等级
+function getRiskBadge(toolName: string): {
+  label: string;
+  cls: string;
+} | null {
+  const name = toolName.toLowerCase();
+  // HIGH: shell/bash/执行类
+  if (/^(shell|bash|exec|cmd|terminal)/.test(name)) {
+    return { label: "HIGH", cls: "bg-error-subtle text-error border-error/40" };
+  }
+  // MEDIUM: 写文件/删除类
+  if (/^(write_file|edit_file|delete_file|remove_file|create_file|move_file)/.test(name)) {
+    return { label: "MED", cls: "bg-warning-subtle text-warning border-warning/40" };
+  }
+  // LOW: 只读类
+  if (/^(read_file|list_files|grep|glob|find|search)/.test(name)) {
+    return { label: "LOW", cls: "bg-success-subtle text-success border-success/40" };
+  }
+  // 默认无徽章
+  return null;
+}
+
 export default function ToolCallCard({
   toolName,
   arguments: args,
@@ -49,6 +71,9 @@ export default function ToolCallCard({
     <XCircle size={14} className="text-error shrink-0" />
   );
 
+  // D1-T07: 风险徽章
+  const risk = getRiskBadge(toolName);
+
   return (
     <div
       className={`border rounded-md ${statusColor} mb-1 text-xs overflow-hidden`}
@@ -56,27 +81,36 @@ export default function ToolCallCard({
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-white/5 transition-colors"
+        className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-surface-hover transition-colors"
       >
-        <Wrench size={12} className="text-textMuted shrink-0" />
+        <Wrench size={12} className="text-text-secondary shrink-0" />
         {statusIcon}
         <span className="font-mono font-medium text-text truncate">
           {toolName}
         </span>
-        <span className="text-textMuted truncate flex-1">
+        {/* D1-T07: 风险徽章 */}
+        {risk && (
+          <span
+            className={`px-1 py-0.5 rounded text-[9px] font-mono font-semibold border shrink-0 ${risk.cls}`}
+            title={`Risk: ${risk.label}`}
+          >
+            {risk.label}
+          </span>
+        )}
+        <span className="text-text-secondary truncate flex-1">
           {argsSummary || "no args"}
         </span>
         {expanded ? (
-          <ChevronDown size={12} className="text-textMuted shrink-0" />
+          <ChevronDown size={12} className="text-text-secondary shrink-0" />
         ) : (
-          <ChevronRight size={12} className="text-textMuted shrink-0" />
+          <ChevronRight size={12} className="text-text-secondary shrink-0" />
         )}
       </button>
 
       {/* Arguments */}
       {expanded && (
         <div className="px-2.5 pb-1.5 border-t border-border/50">
-          <pre className="mt-1.5 text-xs text-textMuted font-mono whitespace-pre-wrap break-all">
+          <pre className="mt-1.5 text-xs text-text-secondary font-mono whitespace-pre-wrap break-all">
             {argsString}
           </pre>
         </div>
@@ -87,12 +121,12 @@ export default function ToolCallCard({
         <div className="border-t border-border/50">
           <button
             onClick={() => setResultExpanded(!resultExpanded)}
-            className="flex items-center gap-1 w-full px-2.5 py-1 text-left hover:bg-white/5 transition-colors"
+            className="flex items-center gap-1 w-full px-2.5 py-1 text-left hover:bg-surface-hover transition-colors"
           >
             {resultExpanded ? (
-              <ChevronDown size={10} className="text-textMuted shrink-0" />
+              <ChevronDown size={10} className="text-text-secondary shrink-0" />
             ) : (
-              <ChevronRight size={10} className="text-textMuted shrink-0" />
+              <ChevronRight size={10} className="text-text-secondary shrink-0" />
             )}
             <span
               className={isSuccess ? "text-success" : "text-error"}
@@ -101,7 +135,7 @@ export default function ToolCallCard({
             </span>
           </button>
           {resultExpanded && (
-            <pre className="px-2.5 pb-1.5 text-xs text-textMuted font-mono whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+            <pre className="px-2.5 pb-1.5 text-xs text-text-secondary font-mono whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
               {output}
             </pre>
           )}

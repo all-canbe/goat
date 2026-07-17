@@ -13,7 +13,7 @@ function App() {
   if (loading) {
     return (
       <div className="h-screen bg-bg flex items-center justify-center">
-        <div className="text-textMuted text-sm">Loading...</div>
+        <div className="text-text-secondary text-sm">Loading...</div>
       </div>
     );
   }
