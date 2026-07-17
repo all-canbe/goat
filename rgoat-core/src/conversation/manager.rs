@@ -27,6 +27,10 @@ pub struct SessionInfo {
     pub updated_at: DateTime<Utc>,
     pub message_count: i64,
     pub workspace: Option<String>,
+    // 会话树：父会话 ID（None 表示根会话）
+    pub parent_session_id: Option<String>,
+    // 会话树：从父会话哪条消息 fork（None 表示全部复制）
+    pub forked_from_message_id: Option<i64>,
 }
 
 /// 会话详情（含消息）
@@ -133,6 +137,17 @@ impl ConversationManager {
         .execute(&pool)
         .await?;
 
+        // 会话树：新增父子关系列（允许 NULL，向后兼容旧会话）
+        // SQLite ALTER TABLE ADD COLUMN 在列已存在时返回错误，用 .ok() 忽略以实现幂等 migration
+        sqlx::query("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE sessions ADD COLUMN forked_from_message_id INTEGER")
+            .execute(&pool)
+            .await
+            .ok();
+
         // Create index on session_id to accelerate WHERE session_id = ? lookups
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)",
@@ -187,6 +202,8 @@ impl ConversationManager {
             updated_at: Utc::now(),
             message_count: 0,
             workspace: workspace.map(|s| s.to_string()),
+            parent_session_id: None,
+            forked_from_message_id: None,
         })
     }
 
@@ -223,12 +240,15 @@ impl ConversationManager {
             updated_at: Utc::now(),
             message_count: 0,
             workspace: workspace.map(|s| s.to_string()),
+            parent_session_id: None,
+            forked_from_message_id: None,
         })
     }
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>, ConversationError> {
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT s.id, s.title, s.created_at, s.updated_at, s.workspace,
+                   s.parent_session_id, s.forked_from_message_id,
                    COUNT(m.id) as message_count
             FROM sessions s
             LEFT JOIN messages m ON s.id = m.session_id
@@ -247,6 +267,7 @@ impl ConversationManager {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT s.id, s.title, s.created_at, s.updated_at, s.workspace,
+                   s.parent_session_id, s.forked_from_message_id,
                    COUNT(m.id) as message_count
             FROM sessions s
             LEFT JOIN messages m ON s.id = m.session_id
@@ -295,9 +316,24 @@ impl ConversationManager {
 
         let fallback_title = format!("Fork of {}", source.title);
         let title = new_title.unwrap_or(&fallback_title);
-        let new_session = self.create_session(Some(title), source.workspace.as_deref()).await?;
+        let new_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
 
-        // Copy messages
+        // 写入新会话，包含 parent_session_id 和 forked_from_message_id
+        sqlx::query(
+            "INSERT INTO sessions (id, title, created_at, updated_at, workspace, parent_session_id, forked_from_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&new_id)
+        .bind(title)
+        .bind(&now)
+        .bind(&now)
+        .bind(&source.workspace)
+        .bind(&session_id)              // parent_session_id 指向源会话
+        .bind(up_to_message_id)         // forked_from_message_id
+        .execute(&self.pool)
+        .await?;
+
+        // Copy messages（保留原逻辑：up_to_message_id 之前的全部复制）
         let messages = self.get_messages(session_id).await?;
         for msg in messages {
             if let Some(up_to) = up_to_message_id {
@@ -306,7 +342,7 @@ impl ConversationManager {
                 }
             }
             self.add_message(
-                &new_session.id,
+                &new_id,
                 &msg.role,
                 &msg.content,
                 msg.tool_calls.as_deref(),
@@ -314,6 +350,10 @@ impl ConversationManager {
             ).await?;
         }
 
+        // 返回新会话的 SessionInfo（重新查询以获取正确 message_count）
+        let new_session = self.get_session(&new_id)
+            .await?
+            .ok_or(ConversationError::NotFound(new_id.clone()))?;
         Ok(new_session)
     }
 
@@ -496,6 +536,8 @@ struct SessionRow {
     updated_at: String,
     workspace: Option<String>,
     message_count: i64,
+    parent_session_id: Option<String>,
+    forked_from_message_id: Option<i64>,
 }
 
 impl From<SessionRow> for SessionInfo {
@@ -511,6 +553,8 @@ impl From<SessionRow> for SessionInfo {
                 .with_timezone(&Utc),
             message_count: row.message_count,
             workspace: row.workspace,
+            parent_session_id: row.parent_session_id,
+            forked_from_message_id: row.forked_from_message_id,
         }
     }
 }
@@ -562,4 +606,100 @@ pub enum ConversationError {
     Io(#[from] std::io::Error),
     #[error("Session not found: {0}")]
     NotFound(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_db() -> ConversationManager {
+        // 使用临时文件 DB，避免 :memory: 在 sqlx 连接池中每个连接独立的问题
+        let temp = std::env::temp_dir().join(format!(
+            "rgoat_test_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&temp);
+        // 用 leak 把路径保存在 manager 内部不便，因此用临时文件方式
+        let mgr = ConversationManager::new_with_path(std::path::Path::new(&temp))
+            .await
+            .expect("Failed to create test DB");
+        // 注册清理（drop 时删除文件）
+        // 注意：无法在 Drop 中删除文件因为 SqlitePool 可能还持有句柄；
+        // 测试用例独立使用不同文件即可。
+        let _ = temp;
+        mgr
+    }
+
+    #[tokio::test]
+    async fn test_fork_session_sets_parent_fields() {
+        let mgr = setup_db().await;
+        // 创建源会话
+        let source = mgr.create_session(Some("Source"), None).await.unwrap();
+        // 添加几条消息
+        mgr.add_message(&source.id, "user", "hello", None, None).await.unwrap();
+        mgr.add_message(&source.id, "assistant", "hi", None, None).await.unwrap();
+        // Fork
+        let forked = mgr.fork_session(&source.id, None, None).await.unwrap();
+        // 验证 parent_session_id 指向源会话
+        assert_eq!(forked.parent_session_id, Some(source.id.clone()));
+        assert_eq!(forked.forked_from_message_id, None);
+        // 验证消息已复制
+        assert_eq!(forked.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_fork_session_with_up_to_message_id() {
+        let mgr = setup_db().await;
+        let source = mgr.create_session(Some("Source"), None).await.unwrap();
+        mgr.add_message(&source.id, "user", "msg1", None, None).await.unwrap();
+        let m2 = mgr.add_message(&source.id, "assistant", "msg2", None, None).await.unwrap();
+        mgr.add_message(&source.id, "user", "msg3", None, None).await.unwrap();
+        // Fork 只复制前 2 条
+        let forked = mgr.fork_session(&source.id, None, Some(m2)).await.unwrap();
+        assert_eq!(forked.parent_session_id, Some(source.id.clone()));
+        assert_eq!(forked.forked_from_message_id, Some(m2));
+        assert_eq!(forked.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_returns_parent_fields() {
+        let mgr = setup_db().await;
+        let source = mgr.create_session(Some("Source"), None).await.unwrap();
+        let _forked = mgr.fork_session(&source.id, None, None).await.unwrap();
+        let sessions = mgr.list_sessions().await.unwrap();
+        // 应有 2 个会话
+        assert_eq!(sessions.len(), 2);
+        // 找到 forked 会话（title 以 "Fork of" 开头）
+        let forked = sessions.iter().find(|s| s.title.starts_with("Fork of")).unwrap();
+        assert_eq!(forked.parent_session_id, Some(source.id.clone()));
+    }
+
+    #[tokio::test]
+    async fn test_migration_is_idempotent() {
+        // 验证重复执行 ALTER TABLE 不会报错（用文件 DB 测试，因为 :memory: 每次都是新的）
+        let temp = std::env::temp_dir().join(format!(
+            "rgoat_test_idem_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&temp);
+        // 第一次创建
+        let _ = ConversationManager::new_with_path(&temp).await.unwrap();
+        // 第二次创建（应触发 ALTER TABLE 但不报错）
+        let mgr = ConversationManager::new_with_path(&temp).await.unwrap();
+        // 验证可以正常创建会话
+        let s = mgr.create_session(Some("Test"), None).await.unwrap();
+        assert_eq!(s.parent_session_id, None);
+        assert_eq!(s.forked_from_message_id, None);
+        // 清理
+        drop(mgr);
+        let _ = std::fs::remove_file(&temp);
+    }
 }

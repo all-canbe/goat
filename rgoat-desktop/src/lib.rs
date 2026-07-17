@@ -142,6 +142,7 @@ pub fn run() {
             commands::get_sessions,
             commands::delete_session,
             commands::rename_session,
+            commands::fork_session,
             commands::list_providers,
             commands::switch_provider,
             commands::get_current_provider,

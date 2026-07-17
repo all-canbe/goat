@@ -28,6 +28,8 @@ pub struct SessionInfo {
     pub title: String,
     pub message_count: i64,
     pub created_at: String,
+    pub parent_session_id: Option<String>,
+    pub forked_from_message_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,7 +149,30 @@ pub async fn get_sessions(
         title: s.title,
         message_count: s.message_count,
         created_at: s.created_at.to_rfc3339(),
+        parent_session_id: s.parent_session_id,
+        forked_from_message_id: s.forked_from_message_id,
     }).collect())
+}
+
+/// Fork a session (create a child session with copied messages)
+#[tauri::command]
+pub async fn fork_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    up_to_message_id: Option<i64>,
+) -> Result<SessionInfo, String> {
+    let session = state.conversation
+        .fork_session(&session_id, None, up_to_message_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(SessionInfo {
+        id: session.id,
+        title: session.title,
+        message_count: session.message_count,
+        created_at: session.created_at.to_rfc3339(),
+        parent_session_id: session.parent_session_id,
+        forked_from_message_id: session.forked_from_message_id,
+    })
 }
 
 /// Delete a conversation session
