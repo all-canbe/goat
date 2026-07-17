@@ -58,7 +58,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
       return (
         <div className="flex justify-start mb-1 gap-3">
           <div className="w-7 h-7 rounded-full bg-primary-subtle flex items-center justify-center shrink-0">
-            <span className="text-xs font-semibold text-text-brand">R</span>
+            <span className="text-xs font-semibold text-brand">R</span>
           </div>
           <div className="max-w-[85%] text-sm text-text prose prose-invert prose-sm max-w-none">
             <ReactMarkdown
