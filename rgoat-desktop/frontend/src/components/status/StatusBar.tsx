@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, ShieldAlert, FileEdit, Coins } from "lucide-react";
+import { Wifi, WifiOff, ShieldAlert, FileEdit, Coins, Wrench } from "lucide-react";
 import { useConfigStore } from "../../stores/configStore";
 import type { TokenUsage } from "../../stores/chatStore";
 
@@ -33,6 +33,7 @@ export default function StatusBar({
   currentMode,
   pendingApprovals,
   totalChanges,
+  toolCallCount,
   tokenUsage,
 }: StatusBarProps) {
   const { currentProvider, providers } = useConfigStore();
@@ -99,6 +100,13 @@ export default function StatusBar({
         <span className="flex items-center gap-1 text-warning" title="Pending approvals">
           <ShieldAlert size={11} />
           <span>{pendingApprovals}</span>
+        </span>
+      )}
+
+      {toolCallCount > 0 && (
+        <span className="flex items-center gap-1 text-text" title="Tool calls in current session">
+          <Wrench size={11} />
+          <span>Tools {toolCallCount}</span>
         </span>
       )}
 

@@ -1,11 +1,15 @@
 import { create } from "zustand";
 import { tauriInvoke } from "../lib/tauri-bridge";
 
+export type ProviderSource = "settings" | "env" | "fallback";
+
 export interface ProviderInfo {
   name: string;
   model: string;
   provider_type: string;
   is_current: boolean;
+  enabled: boolean;
+  source: ProviderSource;
 }
 
 interface ConfigState {
@@ -22,6 +26,19 @@ interface ConfigState {
     model: string,
     name: string
   ) => Promise<void>;
+  setProviderEnabled: (name: string, enabled: boolean) => Promise<void>;
+  deleteProvider: (name: string) => Promise<void>;
+}
+
+function normalizeProvider(p: Partial<ProviderInfo>): ProviderInfo {
+  return {
+    name: p.name ?? "",
+    model: p.model ?? "",
+    provider_type: p.provider_type ?? "",
+    is_current: Boolean(p.is_current),
+    enabled: p.enabled ?? true,
+    source: p.source ?? "settings",
+  };
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -41,7 +58,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   loadProviders: async () => {
     try {
-      const providers = await tauriInvoke<ProviderInfo[]>("list_providers");
+      const raw = await tauriInvoke<Partial<ProviderInfo>[]>("list_providers");
+      const providers = raw.map(normalizeProvider);
       const current = providers.find((p) => p.is_current);
       set({
         providers,
@@ -70,6 +88,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       name,
     });
     set({ hasConfiguredProvider: true, currentProvider: name });
+    await get().loadProviders();
+  },
+
+  setProviderEnabled: async (name, enabled) => {
+    await tauriInvoke("set_provider_enabled", { name, enabled });
+    await get().loadProviders();
+  },
+
+  deleteProvider: async (name) => {
+    await tauriInvoke("delete_provider", { name });
     await get().loadProviders();
   },
 }));

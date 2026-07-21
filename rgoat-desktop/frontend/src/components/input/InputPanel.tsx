@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
-  Send,
-  ChevronDown,
+  ArrowUp,
   Square,
-  Paperclip,
-  SlidersHorizontal,
+  Plus,
+  ChevronDown,
+  Check,
+  Sparkles,
 } from "lucide-react";
 import { tauriInvoke } from "../../lib/tauri-bridge";
 import { useConfigStore } from "../../stores/configStore";
@@ -12,6 +13,12 @@ import { useSessionStore } from "../../stores/sessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useSkillStore, type SkillInfo } from "../../stores/skillStore";
 import { useToastStore } from "../../stores/toastStore";
+import ModelPalette from "../model/ModelPalette";
+import AddProviderDialog from "../dialogs/AddProviderDialog";
+import ModelManagerDialog from "../dialogs/ModelManagerDialog";
+import ThinkingLevelSelector, {
+  type ThinkingLevel,
+} from "./ThinkingLevelSelector";
 
 const MODES = ["Agent", "Plan", "Flow", "YOLO"] as const;
 type Mode = (typeof MODES)[number];
@@ -49,15 +56,21 @@ const HELP_TEXT = `可用 Slash 命令：
 export default function InputPanel({ onModeChange }: InputPanelProps) {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("Agent");
-  const [showProviderMenu, setShowProviderMenu] = useState(false);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("default");
   const [isFocused, setIsFocused] = useState(false);
   // D3-T05: Slash 命令下拉
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Composer 下拉与对话框
+  const [showModeMenu, setShowModeMenu] = useState(false);
+  const [showModelPalette, setShowModelPalette] = useState(false);
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [showManageProviders, setShowManageProviders] = useState(false);
 
-  const { providers, currentProvider, switchProvider, loadProviders } =
-    useConfigStore();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+
+  const { providers, currentProvider, loadProviders } = useConfigStore();
   const { activeSessionId, setActiveSessionId } = useSessionStore();
   const {
     isStreaming,
@@ -104,15 +117,10 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
     (newMode: Mode) => {
       setMode(newMode);
       onModeChange?.(newMode);
+      setShowModeMenu(false);
     },
     [onModeChange]
   );
-
-  // 快捷模式切换：在 MODES 之间循环
-  const cycleMode = useCallback(() => {
-    const nextIndex = (MODES.indexOf(mode) + 1) % MODES.length;
-    handleModeChange(MODES[nextIndex]);
-  }, [mode, handleModeChange]);
 
   // P0-1: 取消 Agent 执行
   const handleCancel = useCallback(async () => {
@@ -143,6 +151,22 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
   useEffect(() => {
     setSlashIndex(0);
   }, [slashFiltered]);
+
+  // 构造 send_prompt 的 payload；thinking_level 仅在非默认时附加
+  const buildPayload = useCallback(
+    (prompt: string) => {
+      const payload: Record<string, unknown> = {
+        prompt,
+        session_id: activeSessionId || undefined,
+        mode: mode.toLowerCase(),
+      };
+      if (thinkingLevel !== "default") {
+        payload.thinking_level = thinkingLevel;
+      }
+      return payload;
+    },
+    [activeSessionId, mode, thinkingLevel]
+  );
 
   // D3-T05: 处理 Slash 命令发送
   const handleSlashCommand = useCallback(
@@ -199,11 +223,10 @@ ${content}
         addUserMessage(raw); // 显示用户输入的 slash 命令
         try {
           setStreaming(true);
-          const res = await tauriInvoke<SendPromptResponse>("send_prompt", {
-            prompt: promptBody,
-            session_id: activeSessionId || undefined,
-            mode: mode.toLowerCase(),
-          });
+          const res = await tauriInvoke<SendPromptResponse>(
+            "send_prompt",
+            buildPayload(promptBody)
+          );
           if (res?.session_id) {
             setActiveSessionId(res.session_id);
           }
@@ -223,10 +246,9 @@ ${content}
       clearMessages,
       addUserMessage,
       setStreaming,
-      activeSessionId,
-      mode,
       setActiveSessionId,
       addToast,
+      buildPayload,
     ]
   );
 
@@ -249,11 +271,10 @@ ${content}
 
     try {
       setStreaming(true);
-      const res = await tauriInvoke<SendPromptResponse>("send_prompt", {
-        prompt: text,
-        session_id: activeSessionId || undefined,
-        mode: mode.toLowerCase(),
-      });
+      const res = await tauriInvoke<SendPromptResponse>(
+        "send_prompt",
+        buildPayload(text)
+      );
       if (res?.session_id) {
         setActiveSessionId(res.session_id);
       }
@@ -265,13 +286,12 @@ ${content}
   }, [
     input,
     isStreaming,
-    activeSessionId,
-    mode,
     addUserMessage,
     setStreaming,
     setActiveSessionId,
     handleSlashCommand,
     addToast,
+    buildPayload,
   ]);
 
   // D3-T05: 选中 Slash 项 → 插入到输入框
@@ -342,6 +362,18 @@ ${content}
     adjustHeight();
   }, [input, adjustHeight]);
 
+  // 点击外部关闭模式菜单
+  useEffect(() => {
+    if (!showModeMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) {
+        setShowModeMenu(false);
+      }
+    }
+    window.addEventListener("mousedown", handleClick);
+    return () => window.removeEventListener("mousedown", handleClick);
+  }, [showModeMenu]);
+
   const modelButtonLabel = currentProvider
     ? currentModel && currentModel !== currentProvider
       ? `${currentProvider} / ${currentModel}`
@@ -351,165 +383,180 @@ ${content}
   return (
     <div className="fixed bottom-[44px] left-1/2 -translate-x-1/2 w-full max-w-[840px] px-4 z-20">
       <div
-        className={`flex gap-2 p-2 rounded-xl bg-surface border shadow-sm transition-colors ${
-          isFocused
-            ? "border-primary ring-2 ring-ring"
-            : "border-border"
+        className={`rounded-2xl bg-surface shadow-md transition-shadow ${
+          isFocused ? "shadow-lg" : "shadow-md"
         }`}
       >
-        {/* 左侧：附件按钮 */}
-        <button
-          type="button"
-          onClick={() => addToast("附件功能待接入", "info")}
-          className="shrink-0 p-2 rounded-lg text-text-secondary hover:bg-surface-hover transition-colors"
-          aria-label="添加附件"
-          title="添加附件"
-        >
-          <Paperclip size={18} />
-        </button>
+        {/* 输入区：无边框 textarea，与卡片融为一体 */}
+        <div className="px-4 pt-4 pb-2">
+          <div className="relative min-w-0">
+            <textarea
+              ref={textareaRef}
+              className="w-full bg-transparent text-text text-base placeholder:text-text-tertiary resize-none outline-none border-none focus:ring-0 min-h-[44px] max-h-[200px]"
+              placeholder={
+                mode === "Plan"
+                  ? "在 Plan Mode 中，agent 将只读取/搜索/分析... (输入 / 查看命令)"
+                  : "Ask anything, / for commands, @ for context..."
+              }
+              value={input}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              disabled={isStreaming}
+              rows={1}
+            />
 
-        {/* 文本域 + Slash 命令下拉 */}
-        <div className="flex-1 relative">
-          <textarea
-            ref={textareaRef}
-            className="w-full px-3 py-2.5 rounded-lg bg-bg border border-border text-text text-sm placeholder:text-text-tertiary resize-none outline-none focus:border-primary min-h-[48px] max-h-[200px]"
-            placeholder={
-              mode === "Plan"
-                ? "在 Plan Mode 中，agent 将只读取/搜索/分析... (输入 / 查看命令)"
-                : "Ask anything... (Enter to send, Shift+Enter for newline, 输入 / 查看 Slash 命令)"
-            }
-            value={input}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            disabled={isStreaming}
-            rows={1}
-          />
-
-          {/* D3-T05: Slash 命令下拉 */}
-          {showSlashMenu && slashFiltered.length > 0 && (
-            <div className="absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[320px] max-h-[280px] overflow-y-auto">
-              <div className="px-3 py-1 text-[10px] text-text-secondary border-b border-border mb-1">
-                Slash 命令 (↑↓ 选择, Tab/Enter 确认, Esc 关闭)
-              </div>
-              {slashFiltered.map((item, idx) => (
-                <button
-                  key={`${item.kind}-${item.name}`}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
-                    idx === slashIndex
-                      ? "bg-primary-subtle text-brand"
-                      : "text-text hover:bg-surface-hover"
-                  }`}
-                  onMouseEnter={() => setSlashIndex(idx)}
-                  onClick={() => selectSlash(item)}
-                >
-                  <span className="text-sm font-mono shrink-0">/{item.name}</span>
-                  <span className="text-xs text-text-secondary truncate flex-1">
-                    {item.description}
-                  </span>
-                  <span className="text-[9px] text-text-secondary shrink-0 uppercase border border-border rounded px-1">
-                    {item.kind === "builtin" ? "cmd" : item.kind}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 右侧工具区：模型选择器 / 模式切换 / 输入选项 / 发送-取消 */}
-        {/* 1. 模型选择器 */}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowProviderMenu(!showProviderMenu)}
-            className="flex items-center gap-1 px-2.5 py-2 h-full rounded-lg border border-border bg-transparent text-xs text-text-secondary hover:bg-surface-hover transition-colors whitespace-nowrap"
-            aria-label="切换模型 Provider"
-            title="切换模型 Provider"
-          >
-            <span className="truncate max-w-[140px]">{modelButtonLabel}</span>
-            <ChevronDown size={12} />
-          </button>
-
-          {showProviderMenu && (
-            <>
-              <div
-                className="fixed inset-0 z-10"
-                onClick={() => setShowProviderMenu(false)}
-              />
-              <div className="absolute bottom-full right-0 mb-2 z-20 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[180px]">
-                {providers.map((p) => (
+            {/* D3-T05: Slash 命令下拉 */}
+            {showSlashMenu && slashFiltered.length > 0 && (
+              <div className="absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[320px] max-h-[280px] overflow-y-auto">
+                <div className="px-3 py-1 text-[10px] text-text-secondary border-b border-border mb-1">
+                  Slash 命令 (↑↓ 选择, Tab/Enter 确认, Esc 关闭)
+                </div>
+                {slashFiltered.map((item, idx) => (
                   <button
-                    key={p.name}
-                    type="button"
-                    onClick={() => {
-                      switchProvider(p.name);
-                      setShowProviderMenu(false);
-                    }}
-                    className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface-hover transition-colors ${
-                      p.is_current ? "text-brand" : "text-text-secondary"
+                    key={`${item.kind}-${item.name}`}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                      idx === slashIndex
+                        ? "bg-primary-subtle text-brand"
+                        : "text-text hover:bg-surface-hover"
                     }`}
+                    onMouseEnter={() => setSlashIndex(idx)}
+                    onClick={() => selectSlash(item)}
                   >
-                    <div>{p.name}</div>
-                    <div className="text-[10px] text-text-secondary">{p.model}</div>
+                    <span className="text-sm font-mono shrink-0">
+                      /{item.name}
+                    </span>
+                    <span className="text-xs text-text-secondary truncate flex-1">
+                      {item.description}
+                    </span>
+                    <span className="text-[9px] text-text-secondary shrink-0 uppercase border border-border rounded px-1">
+                      {item.kind === "builtin" ? "cmd" : item.kind}
+                    </span>
                   </button>
                 ))}
-                {providers.length === 0 && (
-                  <div className="px-3 py-1.5 text-xs text-text-secondary">
-                    No providers
-                  </div>
-                )}
               </div>
-            </>
-          )}
+            )}
+          </div>
         </div>
 
-        {/* 2. 快捷模式切换 */}
-        <button
-          type="button"
-          onClick={cycleMode}
-          className="shrink-0 px-2.5 py-2 rounded-lg text-xs font-medium bg-surface-active text-brand hover:bg-surface-hover transition-colors"
-          aria-label={`当前模式 ${mode}，点击切换`}
-          title={`当前模式 ${mode}，点击切换`}
-        >
-          {mode}
-        </button>
-
-        {/* 3. 输入选项 */}
-        <button
-          type="button"
-          onClick={() => addToast("输入选项待展开", "info")}
-          className="shrink-0 p-2 rounded-lg text-text-secondary hover:bg-surface-hover transition-colors"
-          aria-label="输入选项"
-          title="输入选项"
-        >
-          <SlidersHorizontal size={18} />
-        </button>
-
-        {/* 4. 发送 / 取消 */}
-        {isStreaming ? (
+        {/* 底部工具栏（下巴）：附件 + 模式 + 模型 + 思考强度 + 发送 */}
+        <div className="flex items-center gap-1 px-3 pb-2">
+          {/* 附件 */}
           <button
             type="button"
-            onClick={handleCancel}
-            title="取消 Agent 执行"
-            aria-label="取消 Agent 执行"
-            className="px-4 py-2 rounded-lg bg-error text-white font-semibold text-sm hover:bg-error/90 transition-colors shrink-0 self-end flex items-center justify-center"
+            onClick={() => addToast("附件功能待接入", "info")}
+            className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-text-secondary hover:text-text hover:bg-surface-hover transition-colors"
+            aria-label="添加附件"
+            title="添加附件"
           >
-            <Square size={14} className="fill-white" />
+            <Plus size={18} />
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!input.trim()}
-            className="px-4 py-2 rounded-lg bg-primary text-white font-semibold text-sm hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0 self-end"
-            aria-label="发送"
-            title="发送"
-          >
-            <Send size={16} />
-          </button>
-        )}
+
+          {/* 模式下拉 */}
+          <div ref={modeMenuRef} className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowModeMenu((v) => !v)}
+              aria-label={`当前模式 ${mode}，点击切换`}
+              title={`当前模式 ${mode}，点击切换`}
+              className="flex items-center gap-1 h-7 px-2 rounded-lg text-xs text-text-secondary hover:text-text hover:bg-surface-hover transition-colors whitespace-nowrap"
+            >
+              <span>{mode}</span>
+              <ChevronDown size={12} />
+            </button>
+            {showModeMenu && (
+              <div className="absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[120px]">
+                {MODES.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => handleModeChange(m)}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                      m === mode
+                        ? "bg-primary-subtle text-brand"
+                        : "text-text hover:bg-surface-hover"
+                    }`}
+                  >
+                    <span className="flex-1">{m}</span>
+                    {m === mode && <Check size={12} className="shrink-0" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 模型选择器（复用 ModelPalette 的 dropdown variant） */}
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowModelPalette(true)}
+              aria-label="切换模型"
+              title="切换模型"
+              className="flex items-center gap-1.5 h-7 px-2 rounded-lg text-xs text-text-secondary hover:text-text hover:bg-surface-hover transition-colors whitespace-nowrap"
+            >
+              <Sparkles size={12} />
+              <span className="truncate max-w-[180px]">{modelButtonLabel}</span>
+              <ChevronDown size={12} />
+            </button>
+            <ModelPalette
+              isOpen={showModelPalette}
+              onClose={() => setShowModelPalette(false)}
+              variant="dropdown"
+              onAddProvider={() => setShowAddProvider(true)}
+              onManageProviders={() => setShowManageProviders(true)}
+            />
+          </div>
+
+          {/* 思考强度 */}
+          <ThinkingLevelSelector
+            value={thinkingLevel}
+            onChange={setThinkingLevel}
+            disabled={isStreaming}
+          />
+
+          <div className="flex-1" />
+
+          {/* 发送 / 取消 */}
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={handleCancel}
+              title="取消 Agent 执行"
+              aria-label="取消 Agent 执行"
+              className="shrink-0 w-8 h-8 rounded-lg bg-error text-white hover:bg-error/90 transition-colors flex items-center justify-center"
+            >
+              <Square size={14} className="fill-white" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className="shrink-0 w-8 h-8 rounded-lg bg-primary text-white hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+              aria-label="发送"
+              title="发送"
+            >
+              <ArrowUp size={16} />
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* 新增 Provider 弹窗 */}
+      <AddProviderDialog
+        isOpen={showAddProvider}
+        onClose={() => setShowAddProvider(false)}
+      />
+      {/* 管理 Provider 弹窗 */}
+      <ModelManagerDialog
+        isOpen={showManageProviders}
+        onClose={() => setShowManageProviders(false)}
+        onAddProvider={() => {
+          setShowManageProviders(false);
+          setShowAddProvider(true);
+        }}
+      />
     </div>
   );
 }

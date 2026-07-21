@@ -279,13 +279,13 @@ export default function Sidebar({ collapsed }: SidebarProps) {
           <div className="relative">
             <Search
               size={12}
-              className="absolute left-2 top-1/2 -translate-y-1/2 text-text-secondary pointer-events-none"
+              className="absolute left-2 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none"
             />
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search sessions..."
-              className="w-full pl-7 pr-2 py-1.5 rounded-lg bg-bg border border-border text-xs text-text placeholder:text-text-tertiary focus:border-primary focus-visible:ring-2 focus-visible:ring-ring"
+              className="w-full pl-7 pr-2 py-1.5 rounded-lg bg-surface-hover border border-transparent text-xs text-text placeholder:text-text-tertiary focus:bg-bg focus:border-border focus-visible:ring-0 transition-colors"
               aria-label="搜索会话"
             />
           </div>
