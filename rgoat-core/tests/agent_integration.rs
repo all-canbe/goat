@@ -18,7 +18,7 @@ use rgoat_core::conversation::manager::ConversationManager;
 use rgoat_core::core::cancellation::CancellationToken;
 use rgoat_core::core::event_bus::EventBus;
 use rgoat_core::provider::provider::{
-    ChatMessage, ChatResponse, Choice, LlmError, LlmProvider, LlmStream, MessageContent,
+    ChatMessage, ChatOptions, ChatResponse, Choice, LlmError, LlmProvider, LlmStream, MessageContent,
     ProviderType, Role, ToolCallDef, ToolDef,
 };
 use rgoat_core::security::approval::{AgentMode, ApprovalEngine, ApprovalDecision};
@@ -69,6 +69,7 @@ impl LlmProvider for MockTwoRoundProvider {
         &self,
         messages: &[ChatMessage],
         _tools: &[ToolDef],
+        _options: &ChatOptions,
     ) -> Result<ChatResponse, LlmError> {
         let count = self.next_count();
 
@@ -124,6 +125,7 @@ impl LlmProvider for MockTwoRoundProvider {
         &self,
         _messages: &[ChatMessage],
         _tools: &[ToolDef],
+        _options: &ChatOptions,
     ) -> Result<LlmStream, LlmError> {
         Err(LlmError::Config("stream not implemented for mock".to_string()))
     }
@@ -361,6 +363,7 @@ async fn test_simple_answer_no_tool_calls() {
             &self,
             _messages: &[ChatMessage],
             _tools: &[ToolDef],
+            _options: &ChatOptions,
         ) -> Result<ChatResponse, LlmError> {
             Ok(ChatResponse {
                 choices: vec![Choice {
@@ -381,6 +384,7 @@ async fn test_simple_answer_no_tool_calls() {
             &self,
             _messages: &[ChatMessage],
             _tools: &[ToolDef],
+            _options: &ChatOptions,
         ) -> Result<LlmStream, LlmError> {
             Err(LlmError::Config("not implemented".to_string()))
         }
@@ -511,7 +515,7 @@ async fn test_m1_clear_final_answer_finishes() {
     struct FinalProvider;
     #[async_trait::async_trait]
     impl LlmProvider for FinalProvider {
-        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<ChatResponse, LlmError> {
             Ok(ChatResponse {
                 choices: vec![Choice {
                     message: ChatMessage {
@@ -526,7 +530,7 @@ async fn test_m1_clear_final_answer_finishes() {
                 usage: None,
             })
         }
-        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<LlmStream, LlmError> {
+        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<LlmStream, LlmError> {
             Err(LlmError::Config("n/a".to_string()))
         }
         fn name(&self) -> &str { "final" }
@@ -556,7 +560,7 @@ async fn test_m2_continuation_nudge_when_stuck() {
     struct StuckProvider;
     #[async_trait::async_trait]
     impl LlmProvider for StuckProvider {
-        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<ChatResponse, LlmError> {
             Ok(ChatResponse {
                 choices: vec![Choice {
                     message: ChatMessage {
@@ -571,7 +575,7 @@ async fn test_m2_continuation_nudge_when_stuck() {
                 usage: None,
             })
         }
-        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<LlmStream, LlmError> {
+        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<LlmStream, LlmError> {
             Err(LlmError::Config("n/a".to_string()))
         }
         fn name(&self) -> &str { "stuck" }
@@ -608,7 +612,7 @@ async fn test_m3_dedup_breaker() {
     }
     #[async_trait::async_trait]
     impl LlmProvider for RepeatToolProvider {
-        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<ChatResponse, LlmError> {
             let count = { let mut c = self.call_count.lock().unwrap(); *c += 1; *c };
             if count <= 3 {
                 let tc = ToolCallDef {
@@ -648,7 +652,7 @@ async fn test_m3_dedup_breaker() {
                 })
             }
         }
-        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<LlmStream, LlmError> {
+        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<LlmStream, LlmError> {
             Err(LlmError::Config("n/a".to_string()))
         }
         fn name(&self) -> &str { "repeat" }
@@ -694,7 +698,7 @@ async fn test_m4_truncation_recovery() {
     }
     #[async_trait::async_trait]
     impl LlmProvider for TruncationProvider {
-        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+        async fn chat(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<ChatResponse, LlmError> {
             let count = { let mut c = self.call_count.lock().unwrap(); *c += 1; *c };
             if count == 1 {
                 // 第 1 轮：被截断，无 tool_calls，finish_reason=length
@@ -727,7 +731,7 @@ async fn test_m4_truncation_recovery() {
                 })
             }
         }
-        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef]) -> Result<LlmStream, LlmError> {
+        async fn chat_stream(&self, _m: &[ChatMessage], _t: &[ToolDef], _o: &ChatOptions) -> Result<LlmStream, LlmError> {
             Err(LlmError::Config("n/a".to_string()))
         }
         fn name(&self) -> &str { "trunc" }

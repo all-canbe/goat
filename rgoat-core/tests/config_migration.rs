@@ -3,6 +3,7 @@
 //! 运行：cargo test -p rgoat-core --test config_migration -- --nocapture
 
 use rgoat_core::core::config::Settings;
+use serde_json::json;
 
 /// 测试原版 Goat setting.json 能被正确加载和迁移
 #[test]
@@ -70,4 +71,19 @@ fn test_extra_fields_preserved() {
     println!("sub_model: {}", settings.sub_model.unwrap());
     println!("review_model: {}", settings.review_model.unwrap());
     println!("workspace: {}", settings.workspace.unwrap());
+}
+
+/// 旧版 JSON 未包含 enabled 字段时，Provider 默认启用。
+#[test]
+fn test_provider_enabled_defaults_to_true_for_old_json() {
+    let settings: Settings = serde_json::from_value(json!({
+        "providers": [{
+            "name": "legacy",
+            "base_url": "https://example.com/v1",
+            "api_key": "key"
+        }]
+    }))
+    .expect("old provider JSON should deserialize");
+
+    assert!(settings.providers[0].enabled);
 }

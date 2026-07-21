@@ -305,17 +305,40 @@ pub enum LlmError {
 /// LLM 输出流类型
 pub type LlmStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, LlmError>> + Send>>;
 
+/// 请求级思考强度（不持久化到 AgentConfig）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    Default,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+/// 单次 chat/chat_stream 请求选项
+#[derive(Debug, Clone, Default)]
+pub struct ChatOptions {
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
 /// LLM Provider trait
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// 发送聊天完成请求（非流式）
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> Result<ChatResponse, LlmError>;
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        options: &ChatOptions,
+    ) -> Result<ChatResponse, LlmError>;
 
     /// 发送聊天完成请求（流式）
     async fn chat_stream(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDef],
+        options: &ChatOptions,
     ) -> Result<LlmStream, LlmError>;
 
     /// 获取 provider 名称

@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::agent::react::ReActAgent;
 use crate::agent::types::{AgentError, AgentEvent};
-use crate::provider::provider::{ChatMessage, MessageContent, Role, ToolDef, ToolCallDef};
+use crate::provider::provider::{ChatMessage, ChatOptions, MessageContent, Role, ToolDef, ToolCallDef};
 
 // ============================================================================
 // 常量：阶段系统提示词 + 完成标记（移植自 Python plan_runner.py）
@@ -117,6 +117,15 @@ impl PlanRunner {
 
     /// 运行完整 Plan 生命周期 (Explore + Plan)
     pub async fn run(&self, task: &str) -> Result<PlanResult, AgentError> {
+        self.run_with_options(task, &ChatOptions::default()).await
+    }
+
+    /// 运行 Plan，携带请求级选项
+    pub async fn run_with_options(
+        &self,
+        task: &str,
+        options: &ChatOptions,
+    ) -> Result<PlanResult, AgentError> {
         info!("PlanRunner starting for task: {}", &task[..task.len().min(80)]);
 
         // 添加用户消息
@@ -127,7 +136,7 @@ impl PlanRunner {
             .map_err(|e| AgentError::Tool(e.to_string()))?;
 
         // Phase 1: Explore
-        let explore_content = match self.run_explore_phase().await {
+        let explore_content = match self.run_explore_phase(options).await {
             Ok(c) => c,
             Err(_e) => {
                 return Ok(PlanResult {
@@ -148,7 +157,7 @@ impl PlanRunner {
         }
 
         // Phase 2: Plan
-        let (plan_path, plan_content) = self.run_plan_phase().await?;
+        let (plan_path, plan_content) = self.run_plan_phase(options).await?;
 
         if self.agent.cancellation.is_cancelled() {
             return Ok(PlanResult {
@@ -167,7 +176,7 @@ impl PlanRunner {
 
     // ── Phase 1: 探索 ──
 
-    async fn run_explore_phase(&self) -> Result<String, AgentError> {
+    async fn run_explore_phase(&self, options: &ChatOptions) -> Result<String, AgentError> {
         self.emit_system("🔍 Plan 模式 — 开始探索代码库").await;
 
         let tool_defs = self.get_tool_defs();
@@ -185,7 +194,7 @@ impl PlanRunner {
             let response = self
                 .agent
                 .provider
-                .chat(&messages, &tool_defs)
+                .chat(&messages, &tool_defs, options)
                 .await
                 .map_err(|e| AgentError::Llm(e.to_string()))?;
 
@@ -277,7 +286,7 @@ impl PlanRunner {
         let response = self
             .agent
             .provider
-            .chat(&messages, &tool_defs)
+            .chat(&messages, &tool_defs, options)
             .await
             .map_err(|e| AgentError::Llm(e.to_string()))?;
 
@@ -306,7 +315,7 @@ impl PlanRunner {
 
     // ── Phase 2: 规划 ──
 
-    async fn run_plan_phase(&self) -> Result<(Option<PathBuf>, String), AgentError> {
+    async fn run_plan_phase(&self, options: &ChatOptions) -> Result<(Option<PathBuf>, String), AgentError> {
         self.emit_system("📝 Plan 模式 — 开始制定计划").await;
 
         let tool_defs = self.get_tool_defs();
@@ -326,7 +335,7 @@ impl PlanRunner {
             let response = self
                 .agent
                 .provider
-                .chat(&messages, &tool_defs)
+                .chat(&messages, &tool_defs, options)
                 .await
                 .map_err(|e| AgentError::Llm(e.to_string()))?;
 

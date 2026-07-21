@@ -20,7 +20,7 @@ use crate::conversation::templates::build_system_prompt;
 use crate::conversation::templates::extract_tech_stack_constraints;
 use crate::core::cancellation::CancellationToken;
 use crate::core::event_bus::{EventBus, EventType};
-use crate::provider::provider::{ChatMessage, ChatResponse, Choice, LlmProvider, MessageContent, Role, ToolCallDef, ToolDef, UsageInfo};
+use crate::provider::provider::{ChatMessage, ChatOptions, ChatResponse, Choice, LlmProvider, MessageContent, Role, ToolCallDef, ToolDef, UsageInfo};
 use crate::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder, Decision, ToolCategory, ApprovalScope, SessionCacheKey, calculate_danger_score};
 use crate::security::sandbox::Sandbox;
 use crate::tools::registry::{ToolRegistry, ToolResult};
@@ -439,6 +439,18 @@ impl ReActAgent {
         user_prompt: &str,
         workspace: &str,
     ) -> Result<AgentRunResult, AgentError> {
+        self.run_with_options(session_id, user_prompt, workspace, &ChatOptions::default())
+            .await
+    }
+
+    /// 运行 Agent 处理用户输入，携带请求级选项（如思考强度）
+    pub async fn run_with_options(
+        &self,
+        session_id: &str,
+        user_prompt: &str,
+        workspace: &str,
+        options: &ChatOptions,
+    ) -> Result<AgentRunResult, AgentError> {
         self.emit(AgentEvent::Started {
             mode: self.get_mode().to_string(),
             prompt: user_prompt.to_string(),
@@ -538,7 +550,7 @@ impl ReActAgent {
                 .map_err(|e| AgentError::Tool(e.to_string()))?;
 
             let plan_messages = self.build_messages(session_id, &system_prompt).await?;
-            let plan_response = self.call_llm_with_streaming(&plan_messages, &self.tools.all_tool_defs(), 0).await;
+            let plan_response = self.call_llm_with_streaming(&plan_messages, &self.tools.all_tool_defs(), 0, options).await;
 
             match plan_response {
                 Ok(resp) => {
@@ -722,7 +734,7 @@ impl ReActAgent {
             // D1: 看门狗定时器 — LLM 调用超时则保存 checkpoint 并暂停
             let response = match tokio::time::timeout(
                 Duration::from_secs(self.config.watchdog_timeout_secs),
-                self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step)
+                self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step, options)
             ).await {
                 Ok(Ok(r)) => {
                     llm_fail_count = 0;
@@ -731,7 +743,7 @@ impl ReActAgent {
                 Ok(Err(_e)) => {
                     // 重试一次（应对瞬时 API 错误/网络抖动）
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    match self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step).await {
+                    match self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step, options).await {
                         Ok(r) => {
                             llm_fail_count = 0;
                             r
@@ -1095,7 +1107,7 @@ impl ReActAgent {
                                 if self.get_mode() == AgentMode::Flow {
                                     let diff = crate::agent::flow::get_git_diff(workspace).await;
                                     if !diff.is_empty() {
-                                        let findings = self.run_mid_flow_review(&diff, step).await;
+                                        let findings = self.run_mid_flow_review(&diff, step, options).await;
                                         if !findings.is_empty() {
                                             let findings_text = findings.iter()
                                                 .map(|f| format!(
@@ -1620,14 +1632,15 @@ impl ReActAgent {
         messages: &[ChatMessage],
         tools: &[ToolDef],
         _step: usize,
+        options: &ChatOptions,
     ) -> Result<ChatResponse, AgentError> {
         if !self.config.stream {
-            return self.provider.chat(messages, tools).await
+            return self.provider.chat(messages, tools, options).await
                 .map_err(|e| AgentError::Llm(e.to_string()));
         }
 
         // 尝试流式调用
-        match self.provider.chat_stream(messages, tools).await {
+        match self.provider.chat_stream(messages, tools, options).await {
             Ok(mut stream) => {
                 use futures::StreamExt;
                 use std::collections::BTreeMap;
@@ -1688,7 +1701,7 @@ impl ReActAgent {
                         }
                         Err(e) => {
                             tracing::warn!("Stream chunk error: {}, falling back to non-streaming", e);
-                            return self.provider.chat(messages, tools).await
+                            return self.provider.chat(messages, tools, options).await
                                 .map_err(|e| AgentError::Llm(e.to_string()));
                         }
                     }
@@ -1735,7 +1748,7 @@ impl ReActAgent {
             }
             Err(e) => {
                 tracing::warn!("Stream init failed: {}, falling back to non-streaming", e);
-                self.provider.chat(messages, tools).await
+                self.provider.chat(messages, tools, options).await
                     .map_err(|e| AgentError::Llm(e.to_string()))
             }
         }
@@ -1804,6 +1817,7 @@ impl ReActAgent {
         &self,
         diff: &str,
         step: usize,
+        options: &ChatOptions,
     ) -> Vec<crate::agent::flow::ReviewFinding> {
         let prompt = format!(
             "## Step {}\nReview the following recent code changes (git diff). \
@@ -1832,7 +1846,7 @@ impl ReActAgent {
             },
         ];
 
-        match self.provider.chat(&messages, &[]).await {
+        match self.provider.chat(&messages, &[], options).await {
             Ok(resp) => {
                 if let Some(choice) = resp.choices.into_iter().next() {
                     let text = match choice.message.content {

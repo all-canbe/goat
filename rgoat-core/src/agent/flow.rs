@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::agent::react::ReActAgent;
 use crate::agent::types::{AgentError, AgentRunResult};
-use crate::provider::provider::{ChatMessage, ChatResponse, MessageContent, Role};
+use crate::provider::provider::{ChatMessage, ChatOptions, ChatResponse, MessageContent, Role};
 
 // ============================================================================
 // 常量：审查/规划提示词（移植自 Python pipeline.py）
@@ -223,6 +223,18 @@ impl FlowPipeline {
         prompt: &str,
         workspace: &str,
     ) -> Result<FlowResult, AgentError> {
+        self.run_with_options(session_id, prompt, workspace, &ChatOptions::default())
+            .await
+    }
+
+    /// 运行 Flow，携带请求级选项
+    pub async fn run_with_options(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        workspace: &str,
+        options: &ChatOptions,
+    ) -> Result<FlowResult, AgentError> {
         info!("Starting Flow pipeline for session {}", session_id);
 
         // D3: 复用 load_rules，避免与 implement_agent.run 内部 load_rules 重复加载
@@ -233,7 +245,7 @@ impl FlowPipeline {
         self.emit_thought(0, "[1] Implementation phase starting...").await;
         let mut impl_result = self
             .implement_agent
-            .run(session_id, prompt, workspace)
+            .run_with_options(session_id, prompt, workspace, options)
             .await?;
 
         let mut changes_summary = Vec::new();
@@ -259,7 +271,7 @@ impl FlowPipeline {
                 .collect();
             if !verify_findings.is_empty() {
                 self.emit_thought(0, "  🔧 Auto-fixing verification errors...").await;
-                impl_result = self.run_fix(session_id, prompt, &verify_findings, 0, workspace).await?;
+                impl_result = self.run_fix(session_id, prompt, &verify_findings, 0, workspace, options).await?;
             }
         } else {
             self.emit_thought(0, "  ✅ Verification passed").await;
@@ -299,7 +311,7 @@ impl FlowPipeline {
 
         // 生成验收标准
         self.emit_thought(0, "Generating acceptance criteria...").await;
-        let acceptance_criteria = self.generate_acceptance_criteria(prompt).await;
+        let acceptance_criteria = self.generate_acceptance_criteria(prompt, options).await;
         let ac_satisfied = vec![false; acceptance_criteria.len()];
         if !acceptance_criteria.is_empty() {
             self.emit_thought(0, &format!("  📋 {} acceptance criteria defined", acceptance_criteria.len())).await;
@@ -338,7 +350,7 @@ impl FlowPipeline {
 
             let review_result = self
                 .review_agent
-                .run(&review_session.id, &review_prompt, workspace)
+                .run_with_options(&review_session.id, &review_prompt, workspace, options)
                 .await?;
             let review_text = review_result.answer.clone();
             last_review_text = review_text.clone();
@@ -404,7 +416,7 @@ impl FlowPipeline {
 
             // 修复
             self.emit_thought(round, &format!("[{}/3] Fix phase starting...", round + 1)).await;
-            impl_result = self.run_fix(session_id, prompt, &findings, round, workspace).await?;
+            impl_result = self.run_fix(session_id, prompt, &findings, round, workspace, options).await?;
             fix_rounds = round + 1;
         }
 
@@ -440,11 +452,23 @@ impl FlowPipeline {
         prompt: &str,
         workspace: &str,
     ) -> Result<PlanFirstResult, AgentError> {
+        self.run_plan_first_with_options(session_id, prompt, workspace, &ChatOptions::default())
+            .await
+    }
+
+    /// Plan-First Flow with request-level ChatOptions.
+    pub async fn run_plan_first_with_options(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        workspace: &str,
+        options: &ChatOptions,
+    ) -> Result<PlanFirstResult, AgentError> {
         info!("Starting Plan-First Flow for session {}", session_id);
 
         // 1. 生成计划
         self.emit_thought(0, "[1/3] Generating implementation plan...").await;
-        let original_plan = self.generate_plan(prompt).await?;
+        let original_plan = self.generate_plan(prompt, options).await?;
         if original_plan.is_empty() {
             return Ok(PlanFirstResult {
                 task: prompt.to_string(),
@@ -461,7 +485,7 @@ impl FlowPipeline {
 
         // 2. 审查计划
         self.emit_thought(0, "[2/3] Reviewing plan with stronger model...").await;
-        let reviewed_plan = self.review_plan(prompt, &original_plan).await?;
+        let reviewed_plan = self.review_plan(prompt, &original_plan, options).await?;
         let reviewed_plan = if reviewed_plan.is_empty() {
             self.emit_thought(0, "  ⚠️ Plan review failed, using original plan").await;
             original_plan.clone()
@@ -565,6 +589,7 @@ impl FlowPipeline {
         findings: &[ReviewFinding],
         _iteration: usize,
         workspace: &str,
+        options: &ChatOptions,
     ) -> Result<AgentRunResult, AgentError> {
         let findings_text = findings
             .iter()
@@ -592,7 +617,7 @@ impl FlowPipeline {
         );
 
         self.implement_agent
-            .run(session_id, &fix_prompt, workspace)
+            .run_with_options(session_id, &fix_prompt, workspace, options)
             .await
     }
 
@@ -637,7 +662,7 @@ impl FlowPipeline {
     }
 
     /// 生成验收标准
-    async fn generate_acceptance_criteria(&self, task: &str) -> Vec<String> {
+    async fn generate_acceptance_criteria(&self, task: &str, options: &ChatOptions) -> Vec<String> {
         let prompt = format!(
             "Decompose the following task into 3-6 measurable acceptance criteria.\n\
              Each criterion must be verifiable (can be checked by reading code or running tests).\n\
@@ -657,7 +682,7 @@ impl FlowPipeline {
             },
         ];
 
-        match self.implement_agent.provider.chat(&messages, &[]).await {
+        match self.implement_agent.provider.chat(&messages, &[], options).await {
             Ok(resp) => {
                 if let Some(choice) = resp.choices.into_iter().next() {
                     let text = match choice.message.content {
@@ -699,7 +724,7 @@ impl FlowPipeline {
     }
 
     /// 生成实现计划
-    async fn generate_plan(&self, task: &str) -> Result<String, AgentError> {
+    async fn generate_plan(&self, task: &str, options: &ChatOptions) -> Result<String, AgentError> {
         let prompt = format!(
             "Create a detailed implementation plan for the following task.\n\nTask: {}",
             task
@@ -720,7 +745,7 @@ impl FlowPipeline {
                 tool_calls: None,
             },
         ];
-        match self.implement_agent.provider.chat(&messages, &[]).await {
+        match self.implement_agent.provider.chat(&messages, &[], options).await {
             Ok(resp) => Ok(extract_plan(&resp)),
             Err(e) => {
                 warn!("Plan generation failed: {}", e);
@@ -730,7 +755,7 @@ impl FlowPipeline {
     }
 
     /// 审查计划
-    async fn review_plan(&self, task: &str, original_plan: &str) -> Result<String, AgentError> {
+    async fn review_plan(&self, task: &str, original_plan: &str, options: &ChatOptions) -> Result<String, AgentError> {
         let prompt = format!(
             "## Original Task\n{}\n\n## Original Plan\n{}\n\nReview the plan above and output an improved version.",
             task, original_plan
@@ -751,7 +776,7 @@ impl FlowPipeline {
                 tool_calls: None,
             },
         ];
-        match self.review_agent.provider.chat(&messages, &[]).await {
+        match self.review_agent.provider.chat(&messages, &[], options).await {
             Ok(resp) => Ok(extract_plan(&resp)),
             Err(e) => {
                 warn!("Plan review failed: {}", e);

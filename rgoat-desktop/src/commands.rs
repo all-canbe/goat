@@ -2,6 +2,10 @@
 
 use std::sync::atomic::Ordering;
 
+use rgoat_core::core::config::Settings;
+use rgoat_core::provider::impls::{AnthropicProvider, OpenAiCompatibleProvider};
+use rgoat_core::provider::provider::{ChatOptions, ProviderConfig, ProviderType, ThinkingLevel};
+use std::sync::Arc;
 use tauri::State;
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +18,9 @@ pub struct SendPromptRequest {
     pub prompt: String,
     pub session_id: Option<String>,
     pub mode: Option<String>,
+    /// 请求级思考强度（high/medium/low/max/default）。缺失或未知值视为 Default。
+    #[serde(default)]
+    pub thinking_level: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +45,8 @@ pub struct ProviderInfo {
     pub model: String,
     pub provider_type: String,
     pub is_current: bool,
+    pub enabled: bool,
+    pub source: String,
 }
 
 // ── Agent control types ──
@@ -58,7 +67,72 @@ pub struct AskUserResponse {
 
 // ── Tauri Commands ──
 
+/// env/fallback 保留名称，禁止写入 settings。
+const RESERVED_RUNTIME_PROVIDER_NAMES: &[&str] = &["deepseek", "openai", "anthropic"];
+
+fn assert_settings_provider_name_allowed(name: &str) -> Result<(), String> {
+    let lower = name.trim().to_ascii_lowercase();
+    if RESERVED_RUNTIME_PROVIDER_NAMES.contains(&lower.as_str()) {
+        return Err(format!(
+            "Provider name '{}' is reserved for environment/fallback providers. Choose another name.",
+            name
+        ));
+    }
+    Ok(())
+}
+
+fn merge_provider_lists(
+    settings_items: Vec<ProviderInfo>,
+    runtime_items: Vec<ProviderInfo>,
+) -> Vec<ProviderInfo> {
+    let mut providers = runtime_items;
+    for item in settings_items {
+        if providers.iter().any(|provider| provider.name == item.name) {
+            continue;
+        }
+        providers.push(item);
+    }
+    providers
+}
+
+fn runtime_provider_source(name: &str) -> &'static str {
+    if name == "deepseek" && std::env::var("DEEPSEEK_API_KEY").unwrap_or_default().is_empty() {
+        "fallback"
+    } else {
+        "env"
+    }
+}
+
+/// 解析前端传入的 thinking_level 字符串为 ThinkingLevel。
+/// 缺失、空字符串或未知值返回 None（即 Default，不发送 reasoning_effort 字段）。
+fn parse_thinking_level(s: &Option<String>) -> Option<ThinkingLevel> {
+    match s.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some("low") => Some(ThinkingLevel::Low),
+        Some("medium") => Some(ThinkingLevel::Medium),
+        Some("high") => Some(ThinkingLevel::High),
+        Some("max") => Some(ThinkingLevel::Max),
+        Some("default") => Some(ThinkingLevel::Default),
+        _ => None,
+    }
+}
+
 /// Send a prompt to the Agent (runs asynchronously, emits events to frontend)
+async fn disable_provider<F>(
+    settings: &mut Settings,
+    switch: &rgoat_core::provider::switch::ProviderSwitch,
+    name: &str,
+    save: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Settings) -> Result<(), String>,
+{
+    let provider = settings.providers.iter_mut().find(|provider| provider.name == name)
+        .ok_or_else(|| "Only settings providers can be changed".to_string())?;
+    provider.enabled = false;
+    save(settings)?;
+    unregister_if_registered(switch, name).await
+}
+
 #[tauri::command]
 pub async fn send_prompt(
     state: State<'_, AppState>,
@@ -96,6 +170,10 @@ pub async fn send_prompt(
     agent.set_mode(agent_mode);
     let prompt = request.prompt.clone();
     let workspace = state.workspace.clone();
+    // 请求级思考强度：仅本次 send_prompt 调用生效，不持久化到 AgentConfig
+    let chat_options = ChatOptions {
+        thinking_level: parse_thinking_level(&request.thinking_level),
+    };
 
     // Spawn agent in background
     let handle = tokio::spawn(async move {
@@ -106,7 +184,7 @@ pub async fn send_prompt(
                 workspace.clone(),
                 sid.clone(),
             );
-            runner.run(&prompt).await.map(|plan_result| {
+            runner.run_with_options(&prompt, &chat_options).await.map(|plan_result| {
                 tracing::info!(
                     "Plan completed: phase={:?}, path={:?}",
                     plan_result.phase,
@@ -114,7 +192,7 @@ pub async fn send_prompt(
                 );
             })
         } else {
-            agent.run(&sid, &prompt, &workspace).await.map(|_| ())
+            agent.run_with_options(&sid, &prompt, &workspace, &chat_options).await.map(|_| ())
         };
         if let Err(e) = &result {
             tracing::error!("Agent error: {}", e);
@@ -206,12 +284,31 @@ pub async fn list_providers(
     state: State<'_, AppState>,
 ) -> Result<Vec<ProviderInfo>, String> {
     let details = state.switch.list_details().await;
-    Ok(details.into_iter().map(|d| ProviderInfo {
-        name: d.name,
-        model: d.model,
-        provider_type: d.provider_type,
-        is_current: d.is_current,
-    }).collect())
+    let current = state.switch.current_name().await;
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings_items: Vec<_> = settings.providers.iter().map(|provider| {
+        ProviderInfo {
+            name: provider.name.clone(),
+            model: provider.models.as_ref().and_then(|models| models.first()).cloned().unwrap_or_default(),
+            provider_type: provider.provider_type.clone().unwrap_or_else(|| "openai_compatible".to_string()),
+            is_current: provider.name == current,
+            enabled: provider.enabled,
+            source: "settings".to_string(),
+        }
+    }).collect();
+
+    let runtime_items: Vec<_> = details.into_iter().map(|detail| {
+        ProviderInfo {
+            name: detail.name.clone(),
+            model: detail.model,
+            provider_type: detail.provider_type,
+            is_current: detail.is_current,
+            enabled: true,
+            source: runtime_provider_source(&detail.name).to_string(),
+        }
+    }).collect();
+
+    Ok(merge_provider_lists(settings_items, runtime_items))
 }
 
 /// Switch to a different provider
@@ -253,33 +350,171 @@ pub async fn configure_provider(
     model: String,
     name: String,
 ) -> Result<String, String> {
-    use rgoat_core::core::config::Settings;
-    use rgoat_core::provider::provider::{ProviderConfig, ProviderType};
-    use rgoat_core::provider::impls::{OpenAiCompatibleProvider, AnthropicProvider};
-    use std::sync::Arc;
+    let provider_type = Settings::detect_provider_type(&base_url);
+    let cfg = ProviderConfig::new(provider_type, &name, &base_url, &api_key, &model);
+    let provider = match provider_type {
+        ProviderType::Anthropic => Arc::new(AnthropicProvider::new(cfg)) as Arc<dyn rgoat_core::provider::provider::LlmProvider>,
+        ProviderType::OpenAICompatible => Arc::new(OpenAiCompatibleProvider::new(cfg)),
+    };
 
-    let mut settings = Settings::load_or_empty().map_err(|e| e.to_string())?;
+    state.switch.register(provider).await;
+    state.switch.select(&name).await?;
 
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
     settings.add_or_update_provider(&name, &base_url, &api_key, &model);
     settings.provider = name.clone();
     settings.model = model.clone();
     settings.save().map_err(|e| e.to_string())?;
 
-    // Register the new provider in the running switch and select it immediately
-    let provider_type = Settings::detect_provider_type(&base_url);
-    let cfg = ProviderConfig::new(provider_type, &name, &base_url, &api_key, &model);
-    let provider: Arc<dyn rgoat_core::provider::provider::LlmProvider> = match provider_type {
-        ProviderType::Anthropic => Arc::new(AnthropicProvider::new(cfg)),
-        ProviderType::OpenAICompatible => Arc::new(OpenAiCompatibleProvider::new(cfg)),
-    };
-
-    state.switch.register(provider).await;
-    state.switch.select(&name).await.map_err(|e| e.to_string())?;
-
     Ok(format!(
         "Provider '{}' saved and activated. Model: {}.",
         name, model
     ))
+}
+
+/// 启用或禁用设置文件中的非当前 Provider。
+async fn unregister_if_registered(
+    switch: &rgoat_core::provider::switch::ProviderSwitch,
+    name: &str,
+) -> Result<(), String> {
+    if switch.list_names().await.iter().any(|registered| registered == name) {
+        switch.unregister(name).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_provider_enabled(
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let current = state.switch.current_name().await;
+    if current == name {
+        return Err("Cannot change the active provider".to_string());
+    }
+
+    let settings_provider = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings.providers.iter().find(|provider| provider.name == name).cloned()
+    }.ok_or_else(|| "Only settings providers can be changed".to_string())?;
+
+    if enabled {
+        assert_settings_provider_name_allowed(&name)?;
+        let key = settings_provider.api_key.clone().unwrap_or_default();
+        let base_url = settings_provider.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let model = settings_provider.models.as_ref().and_then(|models| models.first()).cloned().unwrap_or_else(|| "gpt-4o".to_string());
+        let provider_type = Settings::detect_provider_type(&base_url);
+        let cfg = ProviderConfig::new(provider_type, &name, &base_url, key, model);
+        let provider = match provider_type {
+            ProviderType::Anthropic => Arc::new(AnthropicProvider::new(cfg)) as Arc<dyn rgoat_core::provider::provider::LlmProvider>,
+            ProviderType::OpenAICompatible => Arc::new(OpenAiCompatibleProvider::new(cfg)),
+        };
+        state.switch.register(provider).await;
+    } else {
+        let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+        disable_provider(&mut settings, &state.switch, &name, |settings| {
+            settings.save().map_err(|e| e.to_string())
+        }).await?;
+        *state.settings.lock().map_err(|e| e.to_string())? = settings;
+        return Ok(());
+    }
+
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let provider = settings.providers.iter_mut().find(|provider| provider.name == name)
+        .ok_or_else(|| "Only settings providers can be changed".to_string())?;
+    provider.enabled = true;
+    settings.save().map_err(|e| e.to_string())
+}
+
+/// 删除设置文件中的非当前 Provider。
+#[tauri::command]
+pub async fn delete_provider(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<(), String> {
+    if state.switch.current_name().await == name {
+        return Err("Cannot delete the active provider".to_string());
+    }
+
+    {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        if !settings.providers.iter().any(|provider| provider.name == name) {
+            return Err("Only settings providers can be deleted".to_string());
+        }
+    }
+    if state.switch.list_names().await.iter().any(|registered| registered == &name) {
+        state.switch.unregister(&name).await?;
+    }
+
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+    settings.providers.retain(|provider| provider.name != name);
+    settings.save().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rgoat_core::core::config::ProviderSettings;
+    use rgoat_core::provider::switch::ProviderSwitch;
+
+    #[tokio::test]
+    async fn disabling_noncurrent_settings_provider_not_registered_at_runtime_succeeds() {
+        let switch = ProviderSwitch::new();
+        let mut settings = Settings::default();
+        settings.providers.push(ProviderSettings {
+            name: "without-key".to_string(),
+            enabled: true,
+            base_url: Some("https://api.example.com/v1".to_string()),
+            api_key: None,
+            models: Some(vec!["example-model".to_string()]),
+            provider_type: None,
+        });
+
+        let result = disable_provider(&mut settings, &switch, "without-key", |_| Ok(())).await;
+
+        assert!(result.is_ok());
+        assert!(!settings.providers[0].enabled);
+    }
+
+    #[test]
+    fn configure_rejects_reserved_runtime_provider_names() {
+        for name in ["deepseek", "OpenAI", "ANTHROPIC"] {
+            let err = assert_settings_provider_name_allowed(name).unwrap_err();
+            assert!(
+                err.contains("reserved"),
+                "expected reserved-name error for {name}, got: {err}"
+            );
+        }
+        assert!(assert_settings_provider_name_allowed("my-custom").is_ok());
+    }
+
+    #[test]
+    fn list_merge_prefers_runtime_source_over_settings_when_names_collide() {
+        let settings_items = vec![ProviderInfo {
+            name: "openai".to_string(),
+            model: "gpt-settings".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            is_current: false,
+            enabled: false,
+            source: "settings".to_string(),
+        }];
+        let runtime_items = vec![ProviderInfo {
+            name: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            provider_type: "OpenAICompatible".to_string(),
+            is_current: true,
+            enabled: true,
+            source: "env".to_string(),
+        }];
+
+        let merged = merge_provider_lists(settings_items, runtime_items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, "env");
+        assert!(merged[0].enabled);
+        assert!(merged[0].is_current);
+        assert_eq!(merged[0].model, "gpt-4o");
+    }
 }
 
 // ── Approval ──

@@ -61,6 +61,21 @@ impl ProviderSwitch {
         self.providers.get_mut().insert(name, provider);
     }
 
+    /// 注销一个非当前活跃的 provider。
+    pub async fn unregister(&self, name: &str) -> Result<(), String> {
+        if self.current.read().await.as_str() == name {
+            return Err(format!("Cannot unregister the active provider '{}'", name));
+        }
+
+        let removed = self.providers.write().await.remove(name).is_some();
+        if !removed {
+            return Err(format!("Provider '{}' not found", name));
+        }
+        self.names.write().await.retain(|registered| registered != name);
+        tracing::info!("Provider unregistered: {}", name);
+        Ok(())
+    }
+
     /// 切换到指定 provider（按名称）
     pub async fn select(&self, name: &str) -> Result<(), String> {
         let providers = self.providers.read().await;
@@ -125,9 +140,14 @@ pub struct ProviderDetail {
 
 #[async_trait]
 impl LlmProvider for ProviderSwitch {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        options: &ChatOptions,
+    ) -> Result<ChatResponse, LlmError> {
         match self.get_current_async().await {
-            Some(p) => p.chat(messages, tools).await,
+            Some(p) => p.chat(messages, tools, options).await,
             None => Err(LlmError::Config("No provider selected. Use /provider <name>".to_string())),
         }
     }
@@ -136,9 +156,10 @@ impl LlmProvider for ProviderSwitch {
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDef],
+        options: &ChatOptions,
     ) -> Result<LlmStream, LlmError> {
         match self.get_current_async().await {
-            Some(p) => p.chat_stream(messages, tools).await,
+            Some(p) => p.chat_stream(messages, tools, options).await,
             None => Err(LlmError::Config("No provider selected".to_string())),
         }
     }
@@ -154,5 +175,57 @@ impl LlmProvider for ProviderSwitch {
 
     fn provider_type(&self) -> ProviderType {
         ProviderType::OpenAICompatible // default fallback
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    struct TestProvider {
+        name: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TestProvider {
+        async fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ChatOptions,
+        ) -> Result<ChatResponse, LlmError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn chat_stream(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ChatOptions,
+        ) -> Result<LlmStream, LlmError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        fn name(&self) -> &str { &self.name }
+        fn model(&self) -> &str { "test" }
+        fn provider_type(&self) -> ProviderType { ProviderType::OpenAICompatible }
+    }
+
+    #[tokio::test]
+    async fn unregister_removes_provider_and_name_but_refuses_current_provider() {
+        let switch = ProviderSwitch::new();
+        switch.register(Arc::new(TestProvider { name: "first".into() })).await;
+        switch.register(Arc::new(TestProvider { name: "second".into() })).await;
+        switch.select("first").await.unwrap();
+
+        assert_eq!(
+            switch.unregister("first").await,
+            Err("Cannot unregister the active provider 'first'".to_string())
+        );
+        switch.unregister("second").await.unwrap();
+
+        assert_eq!(switch.list_names().await, vec!["first"]);
+        assert!(switch.select("second").await.is_err());
     }
 }

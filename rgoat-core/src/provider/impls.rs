@@ -31,17 +31,13 @@ impl OpenAiCompatibleProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> Result<ChatResponse, LlmError> {
-        let mut body = json!({
-            "model": self.config.model,
-            "messages": messages,
-            "max_tokens": self.config.max_tokens.unwrap_or(4096),
-            "temperature": self.config.temperature.unwrap_or(0.3),
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
-        }
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        options: &ChatOptions,
+    ) -> Result<ChatResponse, LlmError> {
+        let body = build_openai_chat_body(&self.config, messages, tools, false, options);
 
         let mut req = self.client
             .post(format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')))
@@ -65,19 +61,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn chat_stream(
-        &self, messages: &[ChatMessage], tools: &[ToolDef],
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        options: &ChatOptions,
     ) -> Result<LlmStream, LlmError> {
-        let mut body = json!({
-            "model": self.config.model,
-            "messages": messages,
-            "stream": true,
-            "temperature": self.config.temperature.unwrap_or(0.3),
-            "max_tokens": self.config.max_tokens.unwrap_or(4096),
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
-        }
+        let body = build_openai_chat_body(&self.config, messages, tools, true, options);
 
         let mut req = self.client
             .post(format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')))
@@ -199,7 +188,13 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> Result<ChatResponse, LlmError> {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        _options: &ChatOptions,
+    ) -> Result<ChatResponse, LlmError> {
+        // Anthropic ignores ChatOptions for now.
         let (system, anthropic_msgs) = Self::build_anthropic_messages(messages);
         let anthropic_tools = Self::convert_tools(tools);
 
@@ -243,8 +238,12 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn chat_stream(
-        &self, messages: &[ChatMessage], tools: &[ToolDef],
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        _options: &ChatOptions,
     ) -> Result<LlmStream, LlmError> {
+        // Anthropic ignores ChatOptions for now.
         let (system, anthropic_msgs) = Self::build_anthropic_messages(messages);
         let anthropic_tools = Self::convert_tools(tools);
 
@@ -538,6 +537,165 @@ fn content_to_str(content: &MessageContent) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
+        }
+    }
+}
+
+/// Build OpenAI-compatible chat/completions JSON body (unit-testable).
+pub(crate) fn build_openai_chat_body(
+    config: &ProviderConfig,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    stream: bool,
+    options: &ChatOptions,
+) -> serde_json::Value {
+    let mut body = json!({
+        "model": config.model,
+        "messages": messages,
+        "max_tokens": config.max_tokens.unwrap_or(4096),
+        "temperature": config.temperature.unwrap_or(0.3),
+    });
+    if stream {
+        body["stream"] = json!(true);
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    // 请求级思考强度：OpenAI reasoning_effort 字段
+    // Low→low, Medium→medium, High→high, Max→high, Default/None→omit
+    if let Some(level) = options.thinking_level {
+        let effort = match level {
+            ThinkingLevel::Low => Some("low"),
+            ThinkingLevel::Medium => Some("medium"),
+            ThinkingLevel::High | ThinkingLevel::Max => Some("high"),
+            ThinkingLevel::Default => None,
+        };
+        if let Some(effort) = effort {
+            body["reasoning_effort"] = json!(effort);
+        }
+    }
+    body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> ProviderConfig {
+        ProviderConfig::openai("test-key", "gpt-test")
+    }
+
+    fn sample_messages() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+    }
+
+    #[test]
+    fn non_stream_body_sets_reasoning_effort_high() {
+        let options = ChatOptions {
+            thinking_level: Some(ThinkingLevel::High),
+        };
+        let body = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            false,
+            &options,
+        );
+        assert_eq!(body.get("reasoning_effort").and_then(|v| v.as_str()), Some("high"));
+        assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn non_stream_body_omits_reasoning_effort_for_default_and_none() {
+        let body_none = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            false,
+            &ChatOptions::default(),
+        );
+        assert!(body_none.get("reasoning_effort").is_none());
+
+        let body_default = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            false,
+            &ChatOptions {
+                thinking_level: Some(ThinkingLevel::Default),
+            },
+        );
+        assert!(body_default.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn stream_body_sets_reasoning_effort_high() {
+        let options = ChatOptions {
+            thinking_level: Some(ThinkingLevel::High),
+        };
+        let body = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            true,
+            &options,
+        );
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+        assert_eq!(body.get("reasoning_effort").and_then(|v| v.as_str()), Some("high"));
+    }
+
+    #[test]
+    fn stream_body_omits_reasoning_effort_for_default_and_none() {
+        let body_none = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            true,
+            &ChatOptions::default(),
+        );
+        assert_eq!(body_none.get("stream"), Some(&json!(true)));
+        assert!(body_none.get("reasoning_effort").is_none());
+
+        let body_default = build_openai_chat_body(
+            &sample_config(),
+            &sample_messages(),
+            &[],
+            true,
+            &ChatOptions {
+                thinking_level: Some(ThinkingLevel::Default),
+            },
+        );
+        assert_eq!(body_default.get("stream"), Some(&json!(true)));
+        assert!(body_default.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_maps_low_medium_max() {
+        for (level, expected) in [
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::Max, "high"),
+        ] {
+            let body = build_openai_chat_body(
+                &sample_config(),
+                &sample_messages(),
+                &[],
+                false,
+                &ChatOptions { thinking_level: Some(level) },
+            );
+            assert_eq!(
+                body.get("reasoning_effort").and_then(|v| v.as_str()),
+                Some(expected),
+                "level {:?} should map to {}",
+                level,
+                expected
+            );
         }
     }
 }

@@ -17,7 +17,7 @@ use rgoat_core::conversation::manager::ConversationManager;
 use rgoat_core::core::cancellation::CancellationToken;
 use rgoat_core::core::event_bus::EventBus;
 use rgoat_core::provider::provider::{
-    ChatMessage, ChatResponse, Choice, LlmError, LlmProvider, LlmStream, MessageContent,
+    ChatMessage, ChatOptions, ChatResponse, Choice, LlmError, LlmProvider, LlmStream, MessageContent,
     ProviderType, Role, ToolCallDef, ToolDef,
 };
 use rgoat_core::security::approval::{AgentMode, ApprovalEngine};
@@ -52,6 +52,7 @@ impl LlmProvider for MockProvider {
         &self,
         _messages: &[ChatMessage],
         _tools: &[ToolDef],
+        _options: &ChatOptions,
     ) -> Result<ChatResponse, LlmError> {
         let mut c = self.call_count.lock().unwrap();
         *c += 1;
@@ -102,6 +103,7 @@ impl LlmProvider for MockProvider {
         &self,
         _messages: &[ChatMessage],
         _tools: &[ToolDef],
+        _options: &ChatOptions,
     ) -> Result<LlmStream, LlmError> {
         Err(LlmError::Config("stream not implemented for mock".to_string()))
     }

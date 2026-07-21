@@ -34,6 +34,7 @@ pub struct AppState {
     pub conversation: Arc<ConversationManager>,
     pub event_bus: Arc<EventBus>,
     pub switch: Arc<ProviderSwitch>,
+    pub settings: Arc<Mutex<Settings>>,
     pub workspace: String,
     /// Frontend can respond to approval requests by calling respond_approval
     pub pending_approval: Arc<Mutex<Option<PendingApproval>>>,
@@ -148,6 +149,8 @@ pub fn run() {
             commands::get_current_provider,
             commands::has_configured_provider,
             commands::configure_provider,
+            commands::set_provider_enabled,
+            commands::delete_provider,
             commands::respond_approval,
             commands::list_workspace_files,
             commands::cancel_agent,
@@ -222,6 +225,7 @@ async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::erro
             conversation,
             event_bus: event_bus.clone(),
             switch,
+            settings: Arc::new(Mutex::new(settings)),
             workspace: workspace_str,
             pending_approval: Arc::new(Mutex::new(None)),
             pending_ask_user,
@@ -265,7 +269,19 @@ fn init_providers(switch: &mut ProviderSwitch, settings: &Settings) -> String {
     }
 
     // ── Custom providers from settings.json ──
+    // 跳过与 env/fallback 保留名冲突的项，避免覆盖运行时 Provider。
+    let reserved = ["deepseek", "openai", "anthropic"];
     for ps in &settings.providers {
+        if !ps.enabled {
+            continue;
+        }
+        if reserved.iter().any(|name| name.eq_ignore_ascii_case(&ps.name)) {
+            tracing::warn!(
+                "Skipping settings provider '{}' because the name is reserved for environment/fallback providers",
+                ps.name
+            );
+            continue;
+        }
         let mut key = settings.get_api_key(&ps.name).unwrap_or_default();
         if key.is_empty() {
             key = std::env::var(format!("{}_API_KEY", ps.name.to_uppercase())).unwrap_or_default();

@@ -92,6 +92,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSettings {
     pub name: String,
+    #[serde(default = "default_provider_enabled")]
+    pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +111,10 @@ pub struct ProviderSettings {
 
 fn default_provider() -> String {
     "main".to_string()
+}
+
+fn default_provider_enabled() -> bool {
+    true
 }
 
 fn default_model() -> String {
@@ -234,6 +240,7 @@ impl Settings {
 
         let ps = ProviderSettings {
             name: name.clone(),
+            enabled: true,
             base_url: Some(base_url),
             api_key: Some(api_key),
             models: Some(vec![model]),
@@ -304,9 +311,11 @@ impl Settings {
             existing.api_key = if api_key.is_empty() { existing.api_key.clone() } else { Some(api_key.to_string()) };
             existing.models = Some(vec![model.to_string()]);
             existing.provider_type = Some(provider_type.to_api_string());
+            existing.enabled = true;
         } else {
             self.providers.push(ProviderSettings {
                 name: name.to_string(),
+                enabled: true,
                 base_url: Some(base_url.to_string()),
                 api_key: if api_key.is_empty() { None } else { Some(api_key.to_string()) },
                 models: Some(vec![model.to_string()]),
