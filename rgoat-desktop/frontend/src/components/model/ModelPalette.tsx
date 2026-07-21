@@ -37,9 +37,9 @@ export default function ModelPalette({
 
   const { providers, switchProvider } = useConfigStore();
 
-  // 仅展示启用的 settings Provider；env/fallback 仅在非管理上下文中也可见
+  // 展示所有启用的 Provider（含 settings/env/fallback）；禁用项不显示
   const visibleProviders = useMemo<ProviderInfo[]>(
-    () => providers.filter((p) => p.enabled && p.source === "settings"),
+    () => providers.filter((p) => p.enabled),
     [providers]
   );
 

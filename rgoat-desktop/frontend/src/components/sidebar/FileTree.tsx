@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { ChevronRight, ChevronDown, File, Folder, FolderOpen, Loader2 } from "lucide-react";
+import { ChevronRight, ChevronDown, File, Folder, FolderOpen, Loader2, FolderPlus } from "lucide-react";
 import { tauriInvoke } from "../../lib/tauri-bridge";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 
 interface FileTreeNode {
   name: string;
@@ -11,6 +12,7 @@ interface FileTreeNode {
 
 interface FileTreeProps {
   max_depth?: number;
+  onAddWorkspace?: () => void;
 }
 
 const EXTENSION_COLORS: Record<string, string> = {
@@ -116,10 +118,11 @@ function TreeNode({ node, depth, max_depth }: TreeNodeProps) {
   );
 }
 
-export default function FileTree({ max_depth = 3 }: FileTreeProps) {
-  const [tree, setTree] = useState<FileTreeNode[]>([]);
+export default function FileTree({ max_depth = 3, onAddWorkspace }: FileTreeProps) {
+  const [tree, setTree] = useState<FileTreeNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const workspace = useWorkspaceStore((s) => s.workspace);
 
   useEffect(() => {
     let cancelled = false;
@@ -127,11 +130,11 @@ export default function FileTree({ max_depth = 3 }: FileTreeProps) {
       setLoading(true);
       setError(null);
       try {
-        const data = await tauriInvoke<FileTreeNode[]>("list_workspace_files", {
+        const data = await tauriInvoke<FileTreeNode>("list_workspace_files", {
           max_depth,
         });
         if (!cancelled) {
-          setTree(Array.isArray(data) ? data : []);
+          setTree(data);
         }
       } catch (err) {
         if (!cancelled) {
@@ -166,24 +169,47 @@ export default function FileTree({ max_depth = 3 }: FileTreeProps) {
     );
   }
 
-  if (tree.length === 0) {
+  // 临时工作空间提示 + 添加工作空间按钮
+  const temporaryBanner = workspace?.is_temporary ? (
+    <div className="px-3 py-2 border-b border-border bg-warning-subtle">
+      <div className="text-xs text-warning mb-1">临时工作空间</div>
+      <button
+        onClick={() => onAddWorkspace?.()}
+        className="flex items-center gap-1 w-full px-2 py-1 rounded text-xs bg-surface-hover hover:bg-surface-active text-text transition-colors"
+        aria-label="添加工作空间"
+      >
+        <FolderPlus size={12} />
+        <span>添加工作空间</span>
+      </button>
+    </div>
+  ) : null;
+
+  const children = tree?.children ?? [];
+
+  if (children.length === 0) {
     return (
-      <div className="flex items-center justify-center py-8 text-text-secondary">
-        <span className="text-xs">No files</span>
+      <div>
+        {temporaryBanner}
+        <div className="flex items-center justify-center py-8 text-text-secondary">
+          <span className="text-xs">No files</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="py-1">
-      {tree.map((node) => (
-        <TreeNode
-          key={node.path}
-          node={node}
-          depth={0}
-          max_depth={max_depth}
-        />
-      ))}
+    <div>
+      {temporaryBanner}
+      <div className="py-1">
+        {children.map((node) => (
+          <TreeNode
+            key={node.path}
+            node={node}
+            depth={0}
+            max_depth={max_depth}
+          />
+        ))}
+      </div>
     </div>
   );
 }

@@ -22,24 +22,84 @@ use rgoat_core::conversation::manager::ConversationManager;
 use rgoat_core::core::cancellation::CancellationToken;
 use rgoat_core::core::config::Settings;
 use rgoat_core::core::event_bus::EventBus;
-use rgoat_core::core::workspace::resolve_workspace;
 use rgoat_core::memory::vector_store::VectorMemory;
+use rgoat_core::provider::provider::LlmProvider;
 use rgoat_core::provider::switch::ProviderSwitch;
 use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder};
 use rgoat_core::tools::registry::ToolRegistry;
 
+/// 共享可切换的工作空间运行时 — 绑定 workspace + tools + agent
+pub struct WorkspaceRuntime {
+    pub workspace: String,
+    pub temporary: bool,
+    pub tools: Arc<ToolRegistry>,
+    pub agent: Arc<ReActAgent>,
+}
+
+/// 返回临时工作空间的路径（在 app data 目录下）
+pub fn temporary_workspace_path_for() -> std::path::PathBuf {
+    rgoat_core::core::workspace::get_data_dir().join("temporary-workspace")
+}
+
+/// 确保临时工作空间目录存在并返回 canonical 路径
+pub fn ensure_temporary_workspace() -> Result<std::path::PathBuf, String> {
+    let path = temporary_workspace_path_for();
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    path.canonicalize().map_err(|e| e.to_string())
+}
+
+/// 构建一个新的 WorkspaceRuntime，内部创建 ToolRegistry 和 ReActAgent
+pub fn create_workspace_runtime(
+    workspace: String,
+    temporary: bool,
+    provider: Arc<dyn LlmProvider>,
+    approval: Arc<ApprovalEngine>,
+    conversation: Arc<ConversationManager>,
+    event_bus: Arc<EventBus>,
+    cancellation: CancellationToken,
+    paused: Arc<AtomicBool>,
+) -> WorkspaceRuntime {
+    let root_path = std::path::PathBuf::from(&workspace);
+    let tools = Arc::new(ToolRegistry::with_event_bus(
+        root_path,
+        Some(event_bus.clone()),
+    ));
+    let config = AgentConfig::default();
+    let approval_responder: ApprovalResponder =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let agent = Arc::new(ReActAgent::new(
+        config,
+        provider,
+        tools.clone(),
+        approval,
+        conversation,
+        event_bus,
+        cancellation,
+        AgentMode::Agent,
+        paused,
+        approval_responder,
+    ));
+    WorkspaceRuntime {
+        workspace,
+        temporary,
+        tools,
+        agent,
+    }
+}
+
 /// Application state shared across all Tauri commands
 pub struct AppState {
-    pub agent: Arc<ReActAgent>,
+    pub runtime: Arc<tokio::sync::RwLock<WorkspaceRuntime>>,
     pub conversation: Arc<ConversationManager>,
     pub event_bus: Arc<EventBus>,
     pub switch: Arc<ProviderSwitch>,
+    pub approval: Arc<ApprovalEngine>,
     pub settings: Arc<Mutex<Settings>>,
-    pub workspace: String,
     /// Frontend can respond to approval requests by calling respond_approval
     pub pending_approval: Arc<Mutex<Option<PendingApproval>>>,
-    /// Frontend can respond to ask_user requests by calling respond_ask_user
-    pub pending_ask_user: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+    /// Frontend can respond to ask_user requests by calling respond_ask_user.
+    /// 外层 Mutex 用于切换 workspace 时替换内层 Arc；内层 Mutex 保护 HashMap。
+    pub pending_ask_user: Arc<Mutex<Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>>>,
     /// Cancellation token for stopping the running agent
     pub agent_cancellation: CancellationToken,
     /// Whether the agent is paused at a step boundary
@@ -141,6 +201,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::send_prompt,
             commands::get_sessions,
+            commands::create_session,
             commands::delete_session,
             commands::rename_session,
             commands::fork_session,
@@ -165,6 +226,9 @@ pub fn run() {
             // D3-T05: Skill 系统
             commands::list_skills,
             commands::read_skill,
+            // Workspace 管理
+            commands::get_workspace,
+            commands::set_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -172,21 +236,15 @@ pub fn run() {
 
 async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::error::Error>> {
     let settings = Settings::load().unwrap_or_default();
-    let workspace = resolve_workspace(None);
-    let workspace_str = workspace.root().display().to_string();
-    let root_path = workspace.root().to_path_buf();
+
+    // 启动时使用临时工作空间（在 app data 目录下）
+    let temp_path = ensure_temporary_workspace()?;
+    let workspace_str = temp_path.display().to_string();
 
     let event_bus = Arc::new(EventBus::new(256));
     let conversation = Arc::new(ConversationManager::new().await?);
     let approval = Arc::new(ApprovalEngine::new());
     let agent_cancellation = CancellationToken::new();
-
-    // Create tool registry with EventBus so AskUserTool is registered
-    let tools = Arc::new(ToolRegistry::with_event_bus(root_path, Some(event_bus.clone())));
-    let pending_ask_user = tools
-        .pending_ask_user
-        .clone()
-        .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
 
     let memory = Arc::new(VectorMemory::new_in_memory());
     memory.initialize().await?;
@@ -199,34 +257,37 @@ async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::erro
         let _ = switch.select(&default_provider).await;
     }
 
-    let provider: Arc<dyn rgoat_core::provider::provider::LlmProvider> = switch.clone();
-
-    let config = AgentConfig::default();
-
+    let provider: Arc<dyn LlmProvider> = switch.clone();
     let agent_paused = Arc::new(AtomicBool::new(false));
-    let approval_responder: ApprovalResponder =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
-    let agent = Arc::new(ReActAgent::new(
-        config,
+
+    // 用临时 workspace 创建初始 runtime
+    let runtime = create_workspace_runtime(
+        workspace_str,
+        true,
         provider,
-        tools,
-        approval,
+        approval.clone(),
         conversation.clone(),
         event_bus.clone(),
         agent_cancellation.clone(),
-        AgentMode::Agent,
         agent_paused.clone(),
-        approval_responder,
-    ));
+    );
+
+    // pending_ask_user 从 runtime.tools 取，用外层 Mutex 包装以便后续切换 workspace 时替换
+    let pending_ask_user_inner = runtime
+        .tools
+        .pending_ask_user
+        .clone()
+        .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
+    let pending_ask_user = Arc::new(Mutex::new(pending_ask_user_inner));
 
     Ok((
         AppState {
-            agent,
+            runtime: Arc::new(tokio::sync::RwLock::new(runtime)),
             conversation,
             event_bus: event_bus.clone(),
             switch,
+            approval,
             settings: Arc::new(Mutex::new(settings)),
-            workspace: workspace_str,
             pending_approval: Arc::new(Mutex::new(None)),
             pending_ask_user,
             agent_cancellation,

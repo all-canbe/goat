@@ -183,4 +183,41 @@ describe("InputPanel", () => {
     // 思考强度
     expect(screen.getByRole("button", { name: /思考强度/i })).toBeInTheDocument();
   });
+
+  it("forwards onAddProvider callback when palette add button clicked", () => {
+    setCurrentProvider("Alpha", "a-model");
+    const onAddProvider = vi.fn();
+    render(<InputPanel onAddProvider={onAddProvider} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "切换模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接提供商" }));
+    expect(onAddProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards onManageProviders callback when palette manage button clicked", () => {
+    setCurrentProvider("Alpha", "a-model");
+    const onManageProviders = vi.fn();
+    render(<InputPanel onManageProviders={onManageProviders} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "切换模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    expect(onManageProviders).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render AddProviderDialog or ModelManagerDialog internally", () => {
+    setCurrentProvider("Alpha", "a-model");
+    render(<InputPanel onAddProvider={vi.fn()} onManageProviders={vi.fn()} />);
+
+    // 打开 palette 并点击 add — 对话框不应在 InputPanel 内部打开
+    fireEvent.click(screen.getByRole("button", { name: "切换模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接提供商" }));
+    // AddProviderDialog 打开时会渲染 "连接提供商" 标题 span；
+    // 但 palette 已关闭（按钮 aria-label 不是 text content），此处应无此文本
+    expect(screen.queryByText("连接提供商")).not.toBeInTheDocument();
+
+    // 同理验证 manage
+    fireEvent.click(screen.getByRole("button", { name: "切换模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    expect(screen.queryByText("管理模型")).not.toBeInTheDocument();
+  });
 });

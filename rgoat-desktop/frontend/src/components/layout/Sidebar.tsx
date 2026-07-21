@@ -1,4 +1,4 @@
-﻿import { useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Plus,
   MessageSquare,
@@ -213,9 +213,13 @@ export default function Sidebar({ collapsed }: SidebarProps) {
   // P1: 会话搜索
   const [searchQuery, setSearchQuery] = useState("");
 
-  function handleNewSession() {
+  async function handleNewSession() {
     clearMessages();
-    createSession();
+    try {
+      await createSession();
+    } catch {
+      // createSession 失败时不阻断 UI，会话列表保持原状
+    }
   }
 
   function handleSelectSession(session: Session) {

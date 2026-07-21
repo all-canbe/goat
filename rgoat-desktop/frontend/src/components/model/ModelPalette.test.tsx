@@ -32,11 +32,13 @@ describe("ModelPalette", () => {
     setProviders([]);
   });
 
-  it("dropdown variant shows only enabled settings providers", () => {
+  it("dropdown shows all enabled providers regardless of source (settings/env/fallback)", () => {
     setProviders([
       { name: "Alpha", model: "a-model", provider_type: "openai_compatible", is_current: true, enabled: true, source: "settings" },
       { name: "Beta", model: "b-model", provider_type: "openai_compatible", is_current: false, enabled: false, source: "settings" },
       { name: "Gamma", model: "g-model", provider_type: "openai_compatible", is_current: false, enabled: true, source: "env" },
+      { name: "Delta", model: "d-model", provider_type: "openai_compatible", is_current: false, enabled: true, source: "fallback" },
+      { name: "Epsilon", model: "e-model", provider_type: "openai_compatible", is_current: false, enabled: false, source: "env" },
     ]);
 
     render(
@@ -49,9 +51,13 @@ describe("ModelPalette", () => {
       />
     );
 
+    // 所有 enabled 的 Provider 都应显示，不论 source
     expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.getByText("Gamma")).toBeInTheDocument();
+    expect(screen.getByText("Delta")).toBeInTheDocument();
+    // 禁用的 Provider 不显示（不论 source）
     expect(screen.queryByText("Beta")).not.toBeInTheDocument();
-    expect(screen.queryByText("Gamma")).not.toBeInTheDocument();
+    expect(screen.queryByText("Epsilon")).not.toBeInTheDocument();
   });
 
   it("dropdown exposes add and manage entry buttons", () => {

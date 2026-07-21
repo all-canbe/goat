@@ -8,6 +8,7 @@ export interface Session {
   created_at: string;
   parent_session_id?: string | null;
   forked_from_message_id?: number | null;
+  workspace?: string | null;
 }
 
 interface SessionState {
@@ -15,7 +16,7 @@ interface SessionState {
   activeSessionId: string | null;
   loading: boolean;
   loadSessions: () => Promise<void>;
-  createSession: () => void;
+  createSession: () => Promise<void>;
   selectSession: (id: string) => void;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
@@ -39,8 +40,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  createSession: () => {
-    set({ activeSessionId: null });
+  createSession: async () => {
+    // 调用后端 create_session 命令，立即创建会话（归属当前 workspace）
+    // 失败时抛出错误给 UI，不静默吞错
+    const newSession = await tauriInvoke<Session>("create_session");
+    set((s) => ({
+      sessions: [newSession, ...s.sessions],
+      activeSessionId: newSession.id,
+    }));
   },
 
   selectSession: (id) => {

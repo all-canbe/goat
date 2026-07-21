@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FolderTree, GitCompare, MonitorPlay, Terminal } from "lucide-react";
 import FileTree from "../sidebar/FileTree";
 import ChangesPanel from "../sidebar/ChangesPanel";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 
 const TABS = [
   { id: "files", label: "Files", icon: FolderTree },
@@ -13,8 +14,13 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-export default function RightPanel() {
+interface RightPanelProps {
+  onAddWorkspace?: () => void;
+}
+
+export default function RightPanel({ onAddWorkspace }: RightPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("files");
+  const workspacePath = useWorkspaceStore((s) => s.workspace?.path);
 
   return (
     <aside className="w-80 flex flex-col bg-surface border-l border-border shrink-0">
@@ -38,7 +44,14 @@ export default function RightPanel() {
         </div>
       </div>
       <div className="flex-1 overflow-y-auto">
-        {activeTab === "files" && <FileTree max_depth={3} />}
+        {activeTab === "files" && (
+          // workspacePath 作为 key：workspace 切换时强制 FileTree 重新挂载并重新拉取
+          <FileTree
+            key={workspacePath ?? "no-workspace"}
+            max_depth={3}
+            onAddWorkspace={onAddWorkspace}
+          />
+        )}
         {activeTab === "changes" && <ChangesPanel />}
         {activeTab === "diff" && (
           <div className="flex items-center justify-center h-full text-text-secondary text-xs">

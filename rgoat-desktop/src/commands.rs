@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use rgoat_core::core::config::Settings;
 use rgoat_core::provider::impls::{AnthropicProvider, OpenAiCompatibleProvider};
-use rgoat_core::provider::provider::{ChatOptions, ProviderConfig, ProviderType, ThinkingLevel};
+use rgoat_core::provider::provider::{ChatOptions, LlmProvider, ProviderConfig, ProviderType, ThinkingLevel};
 use std::sync::Arc;
 use tauri::State;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ pub struct SessionInfo {
     pub created_at: String,
     pub parent_session_id: Option<String>,
     pub forked_from_message_id: Option<i64>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,15 +148,20 @@ pub async fn send_prompt(
 
     let sid = session_id.clone();
 
+    // 从 runtime read lock 快照 agent 和 workspace，drop lock 后再 await
+    let (agent, workspace) = {
+        let runtime = state.runtime.read().await;
+        (runtime.agent.clone(), runtime.workspace.clone())
+    };
+
     // Create session if it doesn't exist, using the frontend-supplied ID as the
     // real session ID (not just the title). This prevents FOREIGN KEY errors when
     // the Agent later writes tool messages to this session.
     let _ = state.conversation
-        .get_or_create_session(&session_id, Some("New Session"), Some(&state.workspace))
+        .get_or_create_session(&session_id, Some("New Session"), Some(&workspace))
         .await
         .map_err(|e| e.to_string())?;
 
-    let agent = state.agent.clone();
     // D2: 根据前端传的 mode 设置 AgentMode
     let agent_mode = request.mode.as_deref()
         .and_then(|m| match m.to_lowercase().as_str() {
@@ -169,7 +175,6 @@ pub async fn send_prompt(
         .unwrap_or(rgoat_core::security::approval::AgentMode::Agent);
     agent.set_mode(agent_mode);
     let prompt = request.prompt.clone();
-    let workspace = state.workspace.clone();
     // 请求级思考强度：仅本次 send_prompt 调用生效，不持久化到 AgentConfig
     let chat_options = ChatOptions {
         thinking_level: parse_thinking_level(&request.thinking_level),
@@ -229,7 +234,30 @@ pub async fn get_sessions(
         created_at: s.created_at.to_rfc3339(),
         parent_session_id: s.parent_session_id,
         forked_from_message_id: s.forked_from_message_id,
+        workspace: s.workspace,
     }).collect())
+}
+
+/// Create a new conversation session explicitly
+#[tauri::command]
+pub async fn create_session(
+    state: State<'_, AppState>,
+) -> Result<SessionInfo, String> {
+    let workspace = state.runtime.read().await.workspace.clone();
+    let session = state.conversation
+        .create_session(Some("New Session"), Some(&workspace))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(SessionInfo {
+        id: session.id,
+        title: session.title,
+        message_count: session.message_count,
+        created_at: session.created_at.to_rfc3339(),
+        parent_session_id: session.parent_session_id,
+        forked_from_message_id: session.forked_from_message_id,
+        workspace: session.workspace,
+    })
 }
 
 /// Fork a session (create a child session with copied messages)
@@ -250,6 +278,7 @@ pub async fn fork_session(
         created_at: session.created_at.to_rfc3339(),
         parent_session_id: session.parent_session_id,
         forked_from_message_id: session.forked_from_message_id,
+        workspace: session.workspace,
     })
 }
 
@@ -515,6 +544,211 @@ mod tests {
         assert!(merged[0].is_current);
         assert_eq!(merged[0].model, "gpt-4o");
     }
+
+    #[test]
+    fn session_info_includes_workspace_field() {
+        let info = SessionInfo {
+            id: "test-id".to_string(),
+            title: "Test".to_string(),
+            message_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            parent_session_id: None,
+            forked_from_message_id: None,
+            workspace: Some("/tmp/test-workspace".to_string()),
+        };
+        assert_eq!(info.workspace.as_deref(), Some("/tmp/test-workspace"));
+    }
+
+    #[test]
+    fn temporary_workspace_path_for_returns_path_under_data_dir() {
+        let path = crate::temporary_workspace_path_for();
+        let data_dir = rgoat_core::core::workspace::get_data_dir();
+        assert_eq!(path, data_dir.join("temporary-workspace"));
+    }
+
+    #[tokio::test]
+    async fn temporary_workspace_is_created_in_app_data_directory() {
+        let path = crate::ensure_temporary_workspace()
+            .expect("ensure_temporary_workspace should succeed");
+        assert!(path.is_dir(), "temporary workspace should be a directory");
+        let expected_parent = rgoat_core::core::workspace::get_data_dir();
+        // Windows canonicalize 返回 UNC 前缀 \\?\，需同时 canonicalize 父目录比较
+        let expected_canonical = expected_parent.canonicalize().unwrap_or_else(|_| expected_parent.clone());
+        assert!(
+            path.starts_with(&expected_canonical),
+            "temporary workspace should be under app data dir, got {:?}, expected parent {:?}",
+            path,
+            expected_canonical
+        );
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_nonexistent_path() {
+        let nonexistent = format!(
+            "/nonexistent/path/{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let result = validate_workspace_path(&nonexistent);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("does not exist"),
+            "should reject nonexistent path"
+        );
+    }
+
+    #[test]
+    fn validate_workspace_path_accepts_existing_directory() {
+        let temp = std::env::temp_dir();
+        let result = validate_workspace_path(temp.to_str().unwrap());
+        assert!(result.is_ok());
+        let canonical = result.unwrap();
+        assert!(canonical.is_absolute(), "should return absolute canonical path");
+    }
+
+    #[tokio::test]
+    async fn set_workspace_returns_error_when_agent_running() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let agent_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(Some(handle)));
+
+        {
+            let guard = agent_handle.lock().unwrap();
+            let result = check_agent_not_running(&guard);
+            assert!(result.is_err(), "should error when agent is running");
+            assert!(
+                result.unwrap_err().contains("Cannot switch workspace"),
+                "error should mention Cannot switch workspace"
+            );
+        }
+
+        let mut guard = agent_handle.lock().unwrap();
+        if let Some(h) = guard.take() {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_workspace_allows_switch_when_agent_not_running() {
+        let agent_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        {
+            let guard = agent_handle.lock().unwrap();
+            let result = check_agent_not_running(&guard);
+            assert!(result.is_ok(), "should allow switch when no handle");
+        }
+
+        // 用 is_finished() 轮询等待任务完成（不消耗 handle 所有权）
+        let handle = tokio::spawn(async {});
+        while !handle.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let agent_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(Some(handle)));
+        {
+            let guard = agent_handle.lock().unwrap();
+            let result = check_agent_not_running(&guard);
+            assert!(result.is_ok(), "should allow switch when handle is finished");
+        }
+    }
+}
+
+// ── Workspace helpers ──
+
+/// Canonicalize 并验证 workspace 路径。拒绝不存在的路径。
+fn validate_workspace_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    if !p.is_dir() {
+        return Err(format!(
+            "Workspace path does not exist or is not a directory: {}",
+            path
+        ));
+    }
+    p.canonicalize().map_err(|e| e.to_string())
+}
+
+/// 检查 agent 是否未在运行。若正在运行则返回 Err，阻止 workspace 切换。
+fn check_agent_not_running(
+    handle: &Option<tokio::task::JoinHandle<()>>,
+) -> Result<(), String> {
+    if handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false) {
+        return Err("Cannot switch workspace while an agent is running".to_string());
+    }
+    Ok(())
+}
+
+// ── Workspace commands ──
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceInfo {
+    pub path: String,
+    pub is_temporary: bool,
+}
+
+/// 获取当前工作空间信息
+#[tauri::command]
+pub async fn get_workspace(
+    state: State<'_, AppState>,
+) -> Result<WorkspaceInfo, String> {
+    let runtime = state.runtime.read().await;
+    Ok(WorkspaceInfo {
+        path: runtime.workspace.clone(),
+        is_temporary: runtime.temporary,
+    })
+}
+
+/// 切换工作空间。agent 运行中时拒绝切换。
+#[tauri::command]
+pub async fn set_workspace(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorkspaceInfo, String> {
+    // 1. 检查 agent 是否在运行
+    {
+        let guard = state.agent_handle.lock().map_err(|e| e.to_string())?;
+        check_agent_not_running(&guard)?;
+    }
+
+    // 2. 验证并 canonicalize 路径
+    let canonical = validate_workspace_path(&path)?;
+    let workspace_str = canonical.display().to_string();
+
+    // 3. 用 canonical path 创建新 runtime
+    let provider: Arc<dyn LlmProvider> = state.switch.clone();
+    let new_runtime = crate::create_workspace_runtime(
+        workspace_str.clone(),
+        false,
+        provider,
+        state.approval.clone(),
+        state.conversation.clone(),
+        state.event_bus.clone(),
+        state.agent_cancellation.clone(),
+        state.agent_paused.clone(),
+    );
+
+    // 4. 同步更新 pending_ask_user 指向新 tools 的 pending_ask_user
+    let new_pending = new_runtime
+        .tools
+        .pending_ask_user
+        .clone()
+        .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())));
+    *state.pending_ask_user.lock().map_err(|e| e.to_string())? = new_pending;
+
+    // 5. 替换 runtime（write lock）
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = new_runtime;
+    }
+
+    Ok(WorkspaceInfo {
+        path: workspace_str,
+        is_temporary: false,
+    })
 }
 
 // ── Approval ──
@@ -587,7 +821,8 @@ pub async fn list_workspace_files(
     max_depth: Option<usize>,
 ) -> Result<FileTreeNode, String> {
 
-    let ws = std::path::PathBuf::from(&state.workspace);
+    let ws_str = state.runtime.read().await.workspace.clone();
+    let ws = std::path::PathBuf::from(&ws_str);
     let depth = max_depth.unwrap_or(3);
     walk_dir(&ws, &ws, depth).map_err(|e| e.to_string())
 }
@@ -694,10 +929,13 @@ pub async fn respond_ask_user(
     state: State<'_, AppState>,
     response: AskUserResponse,
 ) -> Result<String, String> {
-    let mut pending = state
+    // 外层 Mutex 取出内层 Arc 的 clone，再 lock 内层 Mutex 操作 HashMap
+    let inner = state
         .pending_ask_user
         .lock()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .clone();
+    let mut pending = inner.lock().map_err(|e| e.to_string())?;
 
     if let Some(sender) = pending.remove(&response.request_id) {
         let _ = sender.send(response.response);
@@ -752,7 +990,8 @@ pub async fn add_session_change(
 pub async fn list_skills(
     state: State<'_, AppState>,
 ) -> Result<Vec<rgoat_core::agent::react::SkillInfo>, String> {
-    Ok(rgoat_core::agent::react::ReActAgent::load_skills_structured(&state.workspace))
+    let ws = state.runtime.read().await.workspace.clone();
+    Ok(rgoat_core::agent::react::ReActAgent::load_skills_structured(&ws))
 }
 
 /// 读取指定 skill 的完整 SKILL.md 内容
@@ -761,5 +1000,6 @@ pub async fn read_skill(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<Option<String>, String> {
-    Ok(rgoat_core::agent::react::ReActAgent::read_skill_content(&state.workspace, &name))
+    let ws = state.runtime.read().await.workspace.clone();
+    Ok(rgoat_core::agent::react::ReActAgent::read_skill_content(&ws, &name))
 }

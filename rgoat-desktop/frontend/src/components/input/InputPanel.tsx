@@ -14,8 +14,6 @@ import { useChatStore } from "../../stores/chatStore";
 import { useSkillStore, type SkillInfo } from "../../stores/skillStore";
 import { useToastStore } from "../../stores/toastStore";
 import ModelPalette from "../model/ModelPalette";
-import AddProviderDialog from "../dialogs/AddProviderDialog";
-import ModelManagerDialog from "../dialogs/ModelManagerDialog";
 import ThinkingLevelSelector, {
   type ThinkingLevel,
 } from "./ThinkingLevelSelector";
@@ -25,6 +23,8 @@ type Mode = (typeof MODES)[number];
 
 interface InputPanelProps {
   onModeChange?: (mode: string) => void;
+  onAddProvider?: () => void;
+  onManageProviders?: () => void;
 }
 
 interface SendPromptResponse {
@@ -53,7 +53,7 @@ const HELP_TEXT = `可用 Slash 命令：
 
 可用模式：Agent / Plan / Flow / YOLO`;
 
-export default function InputPanel({ onModeChange }: InputPanelProps) {
+export default function InputPanel({ onModeChange, onAddProvider, onManageProviders }: InputPanelProps) {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("Agent");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("default");
@@ -61,11 +61,9 @@ export default function InputPanel({ onModeChange }: InputPanelProps) {
   // D3-T05: Slash 命令下拉
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
-  // Composer 下拉与对话框
+  // Composer 下拉
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelPalette, setShowModelPalette] = useState(false);
-  const [showAddProvider, setShowAddProvider] = useState(false);
-  const [showManageProviders, setShowManageProviders] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
@@ -503,8 +501,8 @@ ${content}
               isOpen={showModelPalette}
               onClose={() => setShowModelPalette(false)}
               variant="dropdown"
-              onAddProvider={() => setShowAddProvider(true)}
-              onManageProviders={() => setShowManageProviders(true)}
+              onAddProvider={onAddProvider}
+              onManageProviders={onManageProviders}
             />
           </div>
 
@@ -542,21 +540,6 @@ ${content}
           )}
         </div>
       </div>
-
-      {/* 新增 Provider 弹窗 */}
-      <AddProviderDialog
-        isOpen={showAddProvider}
-        onClose={() => setShowAddProvider(false)}
-      />
-      {/* 管理 Provider 弹窗 */}
-      <ModelManagerDialog
-        isOpen={showManageProviders}
-        onClose={() => setShowManageProviders(false)}
-        onAddProvider={() => {
-          setShowManageProviders(false);
-          setShowAddProvider(true);
-        }}
-      />
     </div>
   );
 }

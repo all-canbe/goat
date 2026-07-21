@@ -33,7 +33,12 @@ export default function AddProviderDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-surface border border-border rounded-lg shadow-2xl w-full max-w-md mx-4 overflow-hidden flex flex-col max-h-[90vh]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="连接提供商"
+        className="bg-surface border border-border rounded-lg shadow-2xl w-full max-w-md mx-4 overflow-hidden flex flex-col max-h-[90vh]"
+      >
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-surface">
           <span className="text-sm font-semibold text-text flex-1">
             连接提供商
