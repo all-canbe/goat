@@ -36,3 +36,6 @@ openspec/
 
 # WorkBuddy metadata
 .workbuddy/
+
+# Local Git worktrees
+.worktrees/
