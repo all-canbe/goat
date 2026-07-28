@@ -462,6 +462,7 @@ pub async fn configure_provider(
     model: String,
     name: String,
 ) -> Result<String, String> {
+    assert_settings_provider_name_allowed(&name)?;
     let provider_type = Settings::detect_provider_type(&base_url);
     let cfg = ProviderConfig::new(provider_type, &name, &base_url, &api_key, &model);
     let provider = match provider_type {
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn configure_rejects_reserved_runtime_provider_names() {
-        for name in ["deepseek", "OpenAI", "ANTHROPIC"] {
+        for name in ["deepseek", "OpenAI", "ANTHROPIC", " OpenAI "] {
             let err = assert_settings_provider_name_allowed(name).unwrap_err();
             assert!(
                 err.contains("reserved"),
