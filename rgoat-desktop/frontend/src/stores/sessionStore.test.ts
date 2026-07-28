@@ -231,12 +231,19 @@ describe("sessionStore", () => {
         activeSessionId: "session-a",
       });
 
-      // 选择 B —— 期望行为：在 scheduleWorkspaceSwitch 完成前不应激活 B
-      await useSessionStore.getState().selectSession("session-b");
+      // 选择 B（不等待，因为 selectSession 内部 scheduleWorkspaceSwitch 是 void）
+      const selectPromise = useSessionStore.getState().selectSession("session-b");
 
-      // 期望：activeSessionId 仍为 "session-a"（因为 workspace 切换尚未完成）
+      // 阶段 1：推进 4,999ms —— 防抖窗口内，活动会话应仍为 A
       // 当前代码会在这里失败：selectSession 先设置 activeSessionId 再调用 scheduleWorkspaceSwitch
+      await vi.advanceTimersByTimeAsync(4999);
       expect(useSessionStore.getState().activeSessionId).toBe("session-a");
+
+      // 阶段 2：推进 1ms 触发 5s 定时器，set_workspace resolve 后活动会话才为 B
+      await vi.advanceTimersByTimeAsync(1);
+      await selectPromise;
+
+      expect(useSessionStore.getState().activeSessionId).toBe("session-b");
     } finally {
       vi.useRealTimers();
     }
