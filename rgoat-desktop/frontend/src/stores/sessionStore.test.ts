@@ -40,24 +40,53 @@ describe("sessionStore", () => {
   });
 
   it("loads persisted messages before activating a selected session", async () => {
-    tauriInvokeMock.mockResolvedValueOnce([]);
+    vi.useFakeTimers();
+    try {
+      const info = { path: "E:/workspace", is_temporary: false };
+      tauriInvokeMock.mockImplementation(
+        async (cmd: string, _args?: { sessionId?: string; path?: string }) => {
+          if (cmd === "get_session_messages") return [];
+          if (cmd === "set_workspace") return info;
+          return undefined;
+        },
+      );
 
-    await useSessionStore.getState().selectSession("session-1");
+      const promise = useSessionStore.getState().selectSession("session-1");
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
 
-    expect(tauriInvokeMock).toHaveBeenCalledWith("get_session_messages", {
-      sessionId: "session-1",
-    });
-    expect(useSessionStore.getState().activeSessionId).toBe("session-1");
-    expect(useSessionStore.getState().selectingId).toBeNull();
+      expect(tauriInvokeMock).toHaveBeenCalledWith("get_session_messages", {
+        sessionId: "session-1",
+      });
+      expect(useSessionStore.getState().activeSessionId).toBe("session-1");
+      expect(useSessionStore.getState().selectingId).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("selectSession 联动 scheduleWorkspaceSwitch 传入 session.workspace", async () => {
-    tauriInvokeMock.mockResolvedValueOnce([]);
+    vi.useFakeTimers();
+    try {
+      const info = { path: "E:/workspace", is_temporary: false };
+      tauriInvokeMock.mockImplementation(
+        async (cmd: string, _args?: { sessionId?: string; path?: string }) => {
+          if (cmd === "get_session_messages") return [];
+          if (cmd === "set_workspace") return info;
+          return undefined;
+        },
+      );
 
-    await useSessionStore.getState().selectSession("session-1");
+      const promise = useSessionStore.getState().selectSession("session-1");
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
 
-    // scheduleWorkspaceSwitch 应设置 pendingWorkspacePath 为会话 workspace
-    expect(useWorkspaceStore.getState().pendingWorkspacePath).toBe("E:/workspace");
+      // scheduleWorkspaceSwitch 应在切换完成后更新 workspace，同时清空 pending
+      expect(useWorkspaceStore.getState().workspace?.path).toBe("E:/workspace");
+      expect(useWorkspaceStore.getState().pendingWorkspacePath).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throws when get_session_messages fails", async () => {
@@ -133,70 +162,85 @@ describe("sessionStore", () => {
   });
 
   it("maps history into tool cards and filters internal interventions", async () => {
-    const { useChatStore } = await import("./chatStore");
-    useChatStore.setState({ sessions: {} });
+    vi.useFakeTimers();
+    try {
+      const { useChatStore } = await import("./chatStore");
+      useChatStore.setState({ sessions: {} });
 
-    const toolCalls = JSON.stringify([
-      {
-        id: "call_1",
-        type: "function",
-        function: {
-          name: "write_file",
-          arguments: JSON.stringify({ file_path: "a.ts" }),
+      const toolCalls = JSON.stringify([
+        {
+          id: "call_1",
+          type: "function",
+          function: {
+            name: "write_file",
+            arguments: JSON.stringify({ file_path: "a.ts" }),
+          },
         },
-      },
-    ]);
+      ]);
 
-    tauriInvokeMock.mockResolvedValueOnce([
-      { id: 1, role: "user", content: "帮我创建项目", tool_calls: null, tool_call_id: null },
-      {
-        id: 2,
-        role: "user",
-        content: "前两步工具调用连续失败。请重新评估当前计划，如果当前路径不可行，请使用 ## 计划 重新规划。",
-        tool_calls: null,
-        tool_call_id: null,
-      },
-      {
-        id: 3,
-        role: "assistant",
-        content: "开始写文件",
-        tool_calls: toolCalls,
-        tool_call_id: null,
-      },
-      {
-        id: 4,
-        role: "tool",
-        content: "Successfully wrote a.ts",
-        tool_calls: null,
-        tool_call_id: "call_1",
-      },
-      {
-        id: 5,
-        role: "tool",
-        content: "检测到重复调用 write_file，请更换策略",
-        tool_calls: null,
-        tool_call_id: "missing",
-      },
-    ] satisfies SessionMessage[]);
+      const info = { path: "E:/workspace", is_temporary: false };
+      tauriInvokeMock.mockImplementation(
+        async (cmd: string, _args?: { sessionId?: string; path?: string }) => {
+          if (cmd === "get_session_messages")
+            return [
+              { id: 1, role: "user", content: "帮我创建项目", tool_calls: null, tool_call_id: null },
+              {
+                id: 2,
+                role: "user",
+                content: "前两步工具调用连续失败。请重新评估当前计划，如果当前路径不可行，请使用 ## 计划 重新规划。",
+                tool_calls: null,
+                tool_call_id: null,
+              },
+              {
+                id: 3,
+                role: "assistant",
+                content: "开始写文件",
+                tool_calls: toolCalls,
+                tool_call_id: null,
+              },
+              {
+                id: 4,
+                role: "tool",
+                content: "Successfully wrote a.ts",
+                tool_calls: null,
+                tool_call_id: "call_1",
+              },
+              {
+                id: 5,
+                role: "tool",
+                content: "检测到重复调用 write_file，请更换策略",
+                tool_calls: null,
+                tool_call_id: "missing",
+              },
+            ] satisfies SessionMessage[];
+          if (cmd === "set_workspace") return info;
+          return undefined;
+        },
+      );
 
-    await useSessionStore.getState().selectSession("session-1");
+      const promise = useSessionStore.getState().selectSession("session-1");
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
 
-    const mapped = useChatStore.getState().sessions["session-1"].messages;
-    expect(mapped.map((m) => m.type)).toEqual(["user", "assistant", "tool_call", "tool_call"]);
-    expect(mapped[0].content).toBe("帮我创建项目");
-    expect(mapped[2]).toMatchObject({
-      type: "tool_call",
-      toolName: "write_file",
-      success: true,
-      output: "Successfully wrote a.ts",
-      toolCallId: "call_1",
-    });
-    expect(mapped[3]).toMatchObject({
-      type: "tool_call",
-      success: true,
-      output: "检测到重复调用 write_file，请更换策略",
-    });
-    expect(mapped.some((m) => m.content?.includes("前两步工具调用连续失败"))).toBe(false);
+      const mapped = useChatStore.getState().sessions["session-1"].messages;
+      expect(mapped.map((m) => m.type)).toEqual(["user", "assistant", "tool_call", "tool_call"]);
+      expect(mapped[0].content).toBe("帮我创建项目");
+      expect(mapped[2]).toMatchObject({
+        type: "tool_call",
+        toolName: "write_file",
+        success: true,
+        output: "Successfully wrote a.ts",
+        toolCallId: "call_1",
+      });
+      expect(mapped[3]).toMatchObject({
+        type: "tool_call",
+        success: true,
+        output: "检测到重复调用 write_file，请更换策略",
+      });
+      expect(mapped.some((m) => m.content?.includes("前两步工具调用连续失败"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("会话激活时序：workspace 切换完成前不激活会话", async () => {
