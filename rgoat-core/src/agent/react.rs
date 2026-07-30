@@ -51,6 +51,12 @@ pub struct ReActAgent {
     pub session_cache: Arc<std::sync::Mutex<std::collections::HashMap<SessionCacheKey, Decision>>>,
     /// 沙箱安全层（可选）— 工具执行前校验文件路径是否在允许范围内
     pub sandbox: Option<Arc<dyn Sandbox>>,
+    /// 当前会话 ID — emit 时注入到事件 JSON，供前端按 session 路由状态
+    /// None 用于无会话上下文（TUI 默认、sub_agent 继承父值）
+    pub session_id: Option<Arc<String>>,
+    /// P1: 仅当前 Agent run 可见的临时上下文，不写入 conversation 数据库，
+    /// 用于注入错误提示、断点续传提示等系统消息，避免污染会话历史。
+    ephemeral_context: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl ReActAgent {
@@ -82,6 +88,8 @@ impl ReActAgent {
             auto_approve: false,
             session_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             sandbox: None,
+            session_id: None,
+            ephemeral_context: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -106,12 +114,61 @@ impl ReActAgent {
             auto_approve: true,
             session_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             sandbox: self.sandbox.clone(),
+            session_id: self.session_id.clone(),
+            ephemeral_context: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 创建会话级 Agent 实例 — 共享基础设施但独立 cancellation/paused/approval_responder/session_id
+    ///
+    /// 用于多会话并发：每个 session 拥有独立的取消令牌、暂停标志、审批响应器，
+    /// 使得同一 workspace 内多个 session 可并行运行 agent 而互不干扰。
+    /// 共享 provider/tools/conversation/event_bus/approval（线程安全）。
+    pub fn create_session_agent(
+        &self,
+        session_id: String,
+        cancellation: CancellationToken,
+        paused: Arc<AtomicBool>,
+        approval_responder: ApprovalResponder,
+    ) -> ReActAgent {
+        ReActAgent {
+            config: self.config.clone(),
+            provider: self.provider.clone(),
+            tools: self.tools.clone(),
+            approval: self.approval.clone(),
+            conversation: self.conversation.clone(),
+            event_bus: self.event_bus.clone(),
+            cancellation,
+            mode: AtomicUsize::new(self.get_mode() as usize),
+            paused,
+            approval_responder,
+            context_window: self.context_window.clone(),
+            auto_approve: false,
+            session_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            sandbox: self.sandbox.clone(),
+            session_id: Some(Arc::new(session_id)),
+            ephemeral_context: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// M14: 运行时更新上下文窗口（TUI 从 /models API 获取后调用）
     pub fn update_context_window(&self, window: usize) {
         self.context_window.store(window as u64, Ordering::SeqCst);
+    }
+
+    /// P1: 清空临时上下文，每次 run 开始时调用，避免跨 run 污染。
+    fn clear_ephemeral_context(&self) {
+        if let Ok(mut ctx) = self.ephemeral_context.lock() {
+            ctx.clear();
+        }
+    }
+
+    /// P1: 向临时上下文追加一条 `(role, content)`，只影响当前 Agent run 的模型上下文，
+    /// 不写入 conversation 数据库。
+    fn push_ephemeral(&self, role: &str, content: &str) {
+        if let Ok(mut ctx) = self.ephemeral_context.lock() {
+            ctx.push((role.to_string(), content.to_string()));
+        }
     }
 
     /// 同步 mode（TUI /yolo /agent /plan 等命令调用）
@@ -451,11 +508,17 @@ impl ReActAgent {
         workspace: &str,
         options: &ChatOptions,
     ) -> Result<AgentRunResult, AgentError> {
+        // P1: 每次 run 开始时清空临时上下文，避免跨 run 污染。
+        self.clear_ephemeral_context();
+
         self.emit(AgentEvent::Started {
             mode: self.get_mode().to_string(),
             prompt: user_prompt.to_string(),
         }).await;
 
+        // 将核心执行逻辑收敛到 async block 中，
+        // 外层统一处理 Started 后未被覆盖的错误路径。
+        let core_result: Result<AgentRunResult, AgentError> = async {
         // 保存用户消息
         self.conversation
             .add_message(session_id, "user", user_prompt, None, None)
@@ -480,11 +543,10 @@ impl ReActAgent {
         let persistence = if self.config.task_persistence_enabled {
             match TaskPersistence::new(workspace, session_id).await {
                 Ok(p) => {
-                    // 断点续传：若有历史事件，注入续传提示作为 user 消息
+                    // 断点续传：若有历史事件，把续传提示注入临时上下文，
+                    // 只影响模型上下文，不写入 conversation 数据库。
                     if let Some(resume) = p.build_resume_summary().await {
-                        let _ = self.conversation
-                            .add_message(session_id, "user", &resume, None, None)
-                            .await;
+                        self.push_ephemeral("user", &resume);
                     }
                     Some(p)
                 }
@@ -550,7 +612,7 @@ impl ReActAgent {
                 .map_err(|e| AgentError::Tool(e.to_string()))?;
 
             let plan_messages = self.build_messages(session_id, &system_prompt).await?;
-            let plan_response = self.call_llm_with_streaming(&plan_messages, &self.tools.all_tool_defs(), 0, options).await;
+            let plan_response = self.call_llm_with_deadline(&plan_messages, &self.tools.all_tool_defs(), 0, options).await;
 
             match plan_response {
                 Ok(resp) => {
@@ -731,19 +793,44 @@ impl ReActAgent {
             }
 
             // 调用 LLM（尝试流式，失败回退到非流式；P0 修复：LLM 错误不应 abort session）
-            // D1: 看门狗定时器 — LLM 调用超时则保存 checkpoint 并暂停
-            let response = match tokio::time::timeout(
-                Duration::from_secs(self.config.watchdog_timeout_secs),
-                self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step, options)
-            ).await {
-                Ok(Ok(r)) => {
+            // D1: 看门狗定时器 — 所有 LLM 尝试均适用一致 deadline
+            let response = match self.call_llm_with_deadline(&messages, &self.tools.all_tool_defs(), step, options).await {
+                Ok(r) => {
                     llm_fail_count = 0;
                     r
                 }
-                Ok(Err(_e)) => {
-                    // 重试一次（应对瞬时 API 错误/网络抖动）
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // 看门狗超时：保存进度并暂停，等待用户手动恢复
+                    if err_str.contains("超时") {
+                        tracing::warn!(
+                            "D1 看门狗：LLM 调用超时 {} 秒，保存 checkpoint 并暂停",
+                            self.config.watchdog_timeout_secs
+                        );
+                        if let Some(ref cp) = checkpoint {
+                            let summary = steps_tracker.progress_injection()
+                                .unwrap_or_else(|| last_answer_text.chars().take(200).collect());
+                            let data = CheckpointData {
+                                session_id: session_id.to_string(),
+                                step,
+                                status: CheckpointStatus::Running,
+                                progress_summary: summary,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                            };
+                            if let Err(e) = cp.write(&data).await {
+                                tracing::warn!("checkpoint write on watchdog timeout failed: {}", e);
+                            }
+                        }
+                        self.paused.store(true, Ordering::SeqCst);
+                        self.emit(AgentEvent::Error {
+                            message: "看门狗超时，已保存进度并暂停".to_string(),
+                        }).await;
+                        continue;
+                    }
+
+                    // 非超时错误：重试一次（应对瞬时 API 错误/网络抖动）
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    match self.call_llm_with_streaming(&messages, &self.tools.all_tool_defs(), step, options).await {
+                    match self.call_llm_with_deadline(&messages, &self.tools.all_tool_defs(), step, options).await {
                         Ok(r) => {
                             llm_fail_count = 0;
                             r
@@ -751,8 +838,8 @@ impl ReActAgent {
                         Err(e2) => {
                             llm_fail_count += 1;
                             if llm_fail_count >= 3 {
+                                // 不在此处发射 Error 事件——外层 async block 的 catch 会自动发射
                                 let msg = format!("LLM 连续 {} 次调用失败，已熔断退出。最后错误: {}", llm_fail_count, e2);
-                                self.emit(AgentEvent::Error { message: msg.clone() }).await;
                                 Self::persist_event(&persistence, step, None, TaskStatus::Failed, msg.clone()).await;
                                 Self::mark_checkpoint_completed(&checkpoint, session_id).await;
                                 return Err(AgentError::Llm(msg));
@@ -762,40 +849,12 @@ impl ReActAgent {
                                 message: msg.clone(),
                             }).await;
                             // 对齐 Python try/except + OpenCode 不崩溃模式：
-                            // 注入错误作为 observation，让模型下一轮有机会自行恢复或给用户可见提示
-                            self.conversation
-                                .add_message(session_id, "user", &msg, None, None)
-                                .await
-                                .map_err(|e3| AgentError::Tool(e3.to_string()))?;
+                            // 把错误注入临时上下文，让模型下一轮有机会自行恢复；
+                            // 不写入 conversation 数据库，避免错误消息污染会话历史。
+                            self.push_ephemeral("user", &msg);
                             continue;
                         }
                     }
-                }
-                Err(_elapsed) => {
-                    // D1 看门狗超时：保存进度并暂停，等待用户手动恢复
-                    tracing::warn!(
-                        "D1 看门狗：LLM 调用超时 {} 秒，保存 checkpoint 并暂停",
-                        self.config.watchdog_timeout_secs
-                    );
-                    if let Some(ref cp) = checkpoint {
-                        let summary = steps_tracker.progress_injection()
-                            .unwrap_or_else(|| last_answer_text.chars().take(200).collect());
-                        let data = CheckpointData {
-                            session_id: session_id.to_string(),
-                            step,
-                            status: CheckpointStatus::Running,
-                            progress_summary: summary,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                        };
-                        if let Err(e) = cp.write(&data).await {
-                            tracing::warn!("checkpoint write on watchdog timeout failed: {}", e);
-                        }
-                    }
-                    self.paused.store(true, Ordering::SeqCst);
-                    self.emit(AgentEvent::Error {
-                        message: "看门狗超时，已保存进度并暂停".to_string(),
-                    }).await;
-                    continue;
                 }
             };
 
@@ -881,10 +940,8 @@ impl ReActAgent {
                     self.emit(AgentEvent::Thought { step, content: msg.clone() }).await;
                     // 注：Python 版此处注入 ToolMessage，但 OpenAI 兼容 API 要求 tool 消息必须对应
                     // 前置 assistant 的 tool_call，否则会 400。故改为 user 角色注入，效果等价。
-                    self.conversation
-                        .add_message(session_id, "user", &msg, None, None)
-                        .await
-                        .map_err(|e| AgentError::Tool(e.to_string()))?;
+                    // P1: 使用临时上下文，不写入 conversation 数据库。
+                    self.push_ephemeral("user", &msg);
                     continue;
                 }
 
@@ -936,10 +993,7 @@ impl ReActAgent {
                 if no_tool_count <= 3 {
                     let prompt = continuation_prompt(no_tool_count);
                     self.emit(AgentEvent::Thought { step, content: prompt.clone() }).await;
-                    self.conversation
-                        .add_message(session_id, "user", &prompt, None, None)
-                        .await
-                        .map_err(|e| AgentError::Tool(e.to_string()))?;
+                    self.push_ephemeral("user", &prompt);
                     continue;
                 } else {
                     // 超过最大催促次数（第 4 次）→ 退出循环，以当前累积文本作为结果
@@ -963,10 +1017,62 @@ impl ReActAgent {
                 }
             }
 
+            // P1-5: 截断 tool_call 防护 — 若 finish_reason 为 length/max_tokens 且存在 tool_call，
+            // 不执行审批、沙箱、去重或任何实际工具，为每个调用回填截断错误结果，让模型重新发送完整 batch。
+            if (finish_reason == "length" || finish_reason == "max_tokens") && has_tool_calls {
+                let trunc_msg = format!(
+                    "你的上一条响应被截断了 (finish_reason={})，包含的工具调用无法执行，请重新发送完整调用。",
+                    finish_reason
+                );
+                self.emit(AgentEvent::Thought { step, content: trunc_msg.clone() }).await;
+                if let Some(tool_calls) = &assistant_message.tool_calls {
+                    for tool_call in tool_calls {
+                        let msg = format!(
+                            "工具调用因响应截断未执行 (finish_reason={})，请重新发送完整调用。",
+                            finish_reason
+                        );
+                        self.emit(AgentEvent::ToolResult {
+                            step,
+                            tool_name: tool_call.function.name.clone(),
+                            success: false,
+                            output: msg.clone(),
+                        }).await;
+                        push_event(&mut events, AgentEvent::ToolResult {
+                            step,
+                            tool_name: tool_call.function.name.clone(),
+                            success: false,
+                            output: msg.clone(),
+                        }, self.config.max_events);
+                        self.add_observation(session_id, &tool_call.function.name, &tool_call.id, &msg, true).await?;
+                    }
+                }
+                continue;
+            }
+
             // ── 处理工具调用 ──
             // A2: 跟踪本轮是否有文件变更（write_file/edit_file/patch/git），用于无进展检测
             let mut step_has_file_change = false;
+
+            // P1-1: 预检通过的 tool_call 收集器，支持批量并行/串行调度
+            /// 已通过审批与沙箱校验、等待执行的工具调用
+            struct ReadyTool {
+                name: String,
+                args: serde_json::Value,
+                tool_call_id: String,
+                is_file_change: bool,
+                approve_all: bool,
+                suggest_msg: Option<String>,
+                /// true = 自动放行路径（Allow）；false = 用户审批后放行（Ask→approved）
+                is_auto_approved: bool,
+            }
+            let mut ready_tools: Vec<ReadyTool> = Vec::new();
+            // P3-2: 记录本批原始 tool_call 总数，用于 terminate 判定
+            // 预检失败（解析/ForceSkip/沙箱拒绝/审批拒绝等）不进入 ready_tools，
+            // 但它们的非 terminate 结果仍需计入判定，避免吞掉预检失败结果。
+            let mut original_tool_call_count = 0;
+
             if let Some(tool_calls) = assistant_message.tool_calls {
+                original_tool_call_count = tool_calls.len();
                 for tool_call in tool_calls {
                     tool_calls_count += 1;
                     // P0 修复：parse_tool_call 失败不应 abort 整个 agent（对齐 Python try/except 模式 + OpenCode doom_loop 用户可见而非崩溃）
@@ -1031,10 +1137,7 @@ impl ReActAgent {
                                     step,
                                     content: format!("[replan] {}", replan_msg),
                                 }).await;
-                                self.conversation
-                                    .add_message(session_id, "user", replan_msg, None, None)
-                                    .await
-                                    .map_err(|e| AgentError::Tool(e.to_string()))?;
+                                self.push_ephemeral("user", replan_msg);
                                 consecutive_tool_failures = 0;
                             }
                             // P0 修复：不再硬中止（对齐 OpenCode doom_loop→用户权限 + Python inject-continue）。
@@ -1054,10 +1157,15 @@ impl ReActAgent {
                         arguments: arguments.clone(),
                     }, self.config.max_events);
 
-                    // 查找工具类别
-                    let category = self.tools.get(&name)
-                        .map(|t| t.category())
-                        .unwrap_or(ToolCategory::Read);
+                    // 查找工具类别 — git 工具使用动态分类（基于子命令）
+                    let category = if name == "git" {
+                        let cmd = arguments["command"].as_str().unwrap_or("");
+                        crate::tools::builtin::git_subcommand_category(cmd)
+                    } else {
+                        self.tools.get(&name)
+                            .map(|t| t.category())
+                            .unwrap_or(ToolCategory::Read)
+                    };
 
                     // B1: 子 Agent auto_approve — 非破坏性工具直接 Allow，避免审批通道孤立
                     let approval = if self.auto_approve && category != ToolCategory::Destructive {
@@ -1096,68 +1204,16 @@ impl ReActAgent {
                                 consecutive_tool_failures += 1;
                                 continue;
                             }
-                            // 执行工具
-                            let result = self.tools.execute(&name, arguments).await;
-                            self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
-                            // A2: 记录本轮是否有文件变更工具被执行
-                            if ToolCallDeduper::is_file_change_tool(&name) {
-                                step_has_file_change = true;
-
-                                // Flow 模式运行时审查（对齐 Python main.py mid-flow review）
-                                if self.get_mode() == AgentMode::Flow {
-                                    let diff = crate::agent::flow::get_git_diff(workspace).await;
-                                    if !diff.is_empty() {
-                                        let findings = self.run_mid_flow_review(&diff, step, options).await;
-                                        if !findings.is_empty() {
-                                            let findings_text = findings.iter()
-                                                .map(|f| format!(
-                                                    "[{}] {}:{} - {}\n  suggestion: {}",
-                                                    f.severity.to_uppercase(),
-                                                    f.file_path,
-                                                    f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string()),
-                                                    f.description,
-                                                    f.suggestion
-                                                ))
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-                                            let review_msg = format!(
-                                                "## Mid-Flow Review Findings\n\
-                                                 The following issues were detected in your recent changes. \
-                                                 Please fix them before continuing:\n\n{}",
-                                                findings_text
-                                            );
-                                            self.conversation
-                                                .add_message(session_id, "user", &review_msg, None, None)
-                                                .await
-                                                .map_err(|e| AgentError::Tool(e.to_string()))?;
-                                        }
-                                    }
-                                }
-                            }
-                            push_event(&mut events, AgentEvent::ToolResult {
-                                step,
-                                tool_name: name.clone(),
-                                success: result.success,
-                                output: result.output.clone(),
-                            }, self.config.max_events);
-                            // C2: 跟踪连续工具失败
-                            if result.success {
-                                consecutive_tool_failures = 0;
-                            } else {
-                                consecutive_tool_failures += 1;
-                                if consecutive_tool_failures >= 2 {
-                                    let replan_msg = "前两步工具调用连续失败。请重新评估当前计划，如果当前路径不可行，请使用 ## 计划 重新规划。";
-                                    self.emit(AgentEvent::Thought {
-                                        step,
-                                        content: format!("[replan] {}", replan_msg),
-                                    }).await;
-                                    self.conversation
-                                        .add_message(session_id, "user", replan_msg, None, None)
-                                        .await
-                                        .map_err(|e| AgentError::Tool(e.to_string()))?;
-                                    consecutive_tool_failures = 0;
-                                }
-                            }
+                            // P1-1: 延期执行 — 收集到 batch 中统一调度
+                            ready_tools.push(ReadyTool {
+                                name: name.clone(),
+                                args: arguments,
+                                tool_call_id: tool_call.id.clone(),
+                                is_file_change: ToolCallDeduper::is_file_change_tool(&name),
+                                approve_all: false,
+                                suggest_msg,
+                                is_auto_approved: true,
+                            });
                         }
                         Decision::Ask => {
                             // D3-T03: 先检查持久化规则（Always scope 跨会话）
@@ -1181,23 +1237,16 @@ impl ReActAgent {
                                             consecutive_tool_failures += 1;
                                             continue;
                                         }
-                                        // 持久化规则命中 — 自动放行（流程与 session_cache 命中一致）
-                                        let result = self.tools.execute(&name, arguments).await;
-                                        self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
-                                        if ToolCallDeduper::is_file_change_tool(&name) {
-                                            step_has_file_change = true;
-                                        }
-                                        push_event(&mut events, AgentEvent::ToolResult {
-                                            step,
-                                            tool_name: name.clone(),
-                                            success: result.success,
-                                            output: result.output.clone(),
-                                        }, self.config.max_events);
-                                        if result.success {
-                                            consecutive_tool_failures = 0;
-                                        } else {
-                                            consecutive_tool_failures += 1;
-                                        }
+                                        // P1-1: 延期执行 — 收集到 batch 中统一调度
+                                        ready_tools.push(ReadyTool {
+                                            name: name.clone(),
+                                            args: arguments,
+                                            tool_call_id: tool_call.id.clone(),
+                                            is_file_change: ToolCallDeduper::is_file_change_tool(&name),
+                                            approve_all: false,
+                                            suggest_msg,
+                                            is_auto_approved: false,
+                                        });
                                         continue;
                                     }
                                 }
@@ -1242,23 +1291,16 @@ impl ReActAgent {
                                     consecutive_tool_failures += 1;
                                     continue;
                                 }
-                                // 缓存命中 — 直接执行工具（跳过审批）
-                                let result = self.tools.execute(&name, arguments).await;
-                                self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
-                                if ToolCallDeduper::is_file_change_tool(&name) {
-                                    step_has_file_change = true;
-                                }
-                                push_event(&mut events, AgentEvent::ToolResult {
-                                    step,
-                                    tool_name: name.clone(),
-                                    success: result.success,
-                                    output: result.output.clone(),
-                                }, self.config.max_events);
-                                if result.success {
-                                    consecutive_tool_failures = 0;
-                                } else {
-                                    consecutive_tool_failures += 1;
-                                }
+                                // P1-1: 延期执行 — 收集到 batch 中统一调度
+                                ready_tools.push(ReadyTool {
+                                    name: name.clone(),
+                                    args: arguments,
+                                    tool_call_id: tool_call.id.clone(),
+                                    is_file_change: ToolCallDeduper::is_file_change_tool(&name),
+                                    approve_all: false,
+                                    suggest_msg,
+                                    is_auto_approved: false,
+                                });
                                 continue;
                             }
 
@@ -1368,44 +1410,16 @@ impl ReActAgent {
                                                 consecutive_tool_failures += 1;
                                                 continue;
                                             }
-                                            // Approved — execute the tool
-                                            let result = self.tools.execute(&name, arguments.clone()).await;
-                                            self.handle_tool_result(session_id, step, &name, &tool_call.id, &result).await?;
-                                            // A2: 记录本轮是否有文件变更工具被执行
-                                            if ToolCallDeduper::is_file_change_tool(&name) {
-                                                step_has_file_change = true;
-                                            }
-                                            if dec.approve_all {
-                                                self.emit(AgentEvent::Approval {
-                                                    tool_name: name.clone(),
-                                                    decision: "approved_all".to_string(),
-                                                    message: "Approved and will auto-approve subsequent calls".to_string(),
-                                                }).await;
-                                            }
-                                            push_event(&mut events, AgentEvent::ToolResult {
-                                                step,
-                                                tool_name: name.clone(),
-                                                success: result.success,
-                                                output: result.output.clone(),
-                                            }, self.config.max_events);
-                                            // C2: 跟踪连续工具失败
-                                            if result.success {
-                                                consecutive_tool_failures = 0;
-                                            } else {
-                                                consecutive_tool_failures += 1;
-                                                if consecutive_tool_failures >= 2 {
-                                                    let replan_msg = "前两步工具调用连续失败。请重新评估当前计划，如果当前路径不可行，请使用 ## 计划 重新规划。";
-                                                    self.emit(AgentEvent::Thought {
-                                                        step,
-                                                        content: format!("[replan] {}", replan_msg),
-                                                    }).await;
-                                                    self.conversation
-                                                        .add_message(session_id, "user", replan_msg, None, None)
-                                                        .await
-                                                        .map_err(|e| AgentError::Tool(e.to_string()))?;
-                                                    consecutive_tool_failures = 0;
-                                                }
-                                            }
+                                            // P1-1: 延期执行 — 收集到 batch 中统一调度
+                                            ready_tools.push(ReadyTool {
+                                                name: name.clone(),
+                                                args: arguments.clone(),
+                                                tool_call_id: tool_call.id.clone(),
+                                                is_file_change: ToolCallDeduper::is_file_change_tool(&name),
+                                                approve_all: dec.approve_all,
+                                                suggest_msg,
+                                                is_auto_approved: false,
+                                            });
                                         }
                                         _ => {
                                             // Denied or channel error
@@ -1430,10 +1444,7 @@ impl ReActAgent {
                                                     step,
                                                     content: format!("[replan] {}", replan_msg),
                                                 }).await;
-                                                self.conversation
-                                                    .add_message(session_id, "user", replan_msg, None, None)
-                                                    .await
-                                                    .map_err(|e| AgentError::Tool(e.to_string()))?;
+                                self.push_ephemeral("user", replan_msg);
                                                 consecutive_tool_failures = 0;
                                             }
                                         }
@@ -1462,10 +1473,7 @@ impl ReActAgent {
                                             step,
                                             content: format!("[replan] {}", replan_msg),
                                         }).await;
-                                        self.conversation
-                                            .add_message(session_id, "user", replan_msg, None, None)
-                                            .await
-                                            .map_err(|e| AgentError::Tool(e.to_string()))?;
+                                self.push_ephemeral("user", replan_msg);
                                         consecutive_tool_failures = 0;
                                     }
                                 }
@@ -1503,24 +1511,158 @@ impl ReActAgent {
                                     step,
                                     content: format!("[replan] {}", replan_msg),
                                 }).await;
-                                self.conversation
-                                    .add_message(session_id, "user", replan_msg, None, None)
-                                    .await
-                                    .map_err(|e| AgentError::Tool(e.to_string()))?;
+                                self.push_ephemeral("user", replan_msg);
                                 consecutive_tool_failures = 0;
                             }
                         }
                         Decision::Defer => {}
                     }
 
-                    // A2 修复: Suggest 提示在工具结果（tool 消息）之后注入，保证消息顺序
-                    // assistant(tool_calls) → tool(tool_call_id) → user(suggest) 符合 OpenAI API 规范
-                    if let Some(msg) = &suggest_msg {
-                        self.conversation
-                            .add_message(session_id, "user", msg, None, None)
-                            .await
-                            .map_err(|e| AgentError::Tool(e.to_string()))?;
+                    // suggest_msg 注入推迟到批量结果处理阶段执行
+                }
+            }
+
+            // ── P1-1: 执行所有已就绪的工具调用（批量调度） ──
+            // P2-1: 为每个工具创建流式执行上下文
+            if !ready_tools.is_empty() {
+                let all_parallel = ready_tools.iter().all(|rt| {
+                    self.tools.get(&rt.name)
+                        .map(|t| t.execution_mode() == crate::tools::registry::ExecutionMode::Parallel)
+                        .unwrap_or(false)
+                });
+
+                // P2-1: 创建流式上下文，分离 contexts 和 receivers
+                let mut ctxs: Vec<crate::tools::registry::ToolExecutionContext> = Vec::new();
+                let mut rxs: Vec<tokio::sync::mpsc::UnboundedReceiver<crate::tools::registry::ToolStreamEvent>> = Vec::new();
+                for rt in &ready_tools {
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    let ctx = crate::tools::registry::ToolExecutionContext::with_streaming(
+                        rt.tool_call_id.clone(),
+                        Some(self.cancellation.clone()),
+                        tx,
+                    );
+                    ctxs.push(ctx);
+                    rxs.push(rx);
+                }
+
+                // P2-1: 为每个 receiver 启动转发任务，将流式更新推送到 EventBus
+                let event_bus = self.event_bus.clone();
+                let sid = session_id.to_string();
+                for mut rx in rxs {
+                    let bus = event_bus.clone();
+                    let s = sid.clone();
+                    tokio::spawn(async move {
+                        while let Some(event) = rx.recv().await {
+                            bus.emit(
+                                crate::core::event_bus::EventType::ToolStreamUpdate,
+                                &s,
+                                serde_json::json!(event),
+                            );
+                        }
+                    });
+                }
+
+                let results: Vec<crate::tools::registry::ToolResult> = if all_parallel {
+                    futures::future::join_all(
+                        ready_tools.iter().zip(ctxs.iter()).map(|(rt, ctx)| self.tools.execute_ctx(&rt.name, rt.args.clone(), ctx))
+                    ).await
+                } else {
+                    let mut r = Vec::with_capacity(ready_tools.len());
+                    for (i, rt) in ready_tools.iter().enumerate() {
+                        r.push(self.tools.execute_ctx(&rt.name, rt.args.clone(), &ctxs[i]).await);
                     }
+                    r
+                };
+
+                // ── 按原始 tool_call 顺序处理结果 ──
+                for (rt, result) in ready_tools.iter().zip(results.iter()) {
+                    self.handle_tool_result(session_id, step, &rt.name, &rt.tool_call_id, result).await?;
+
+                    if rt.is_file_change {
+                        step_has_file_change = true;
+                        // Flow 模式运行时审查（仅自动放行的工具需要审查）
+                        if rt.is_auto_approved && self.get_mode() == AgentMode::Flow {
+                            let diff = crate::agent::flow::get_git_diff(workspace).await;
+                            if !diff.is_empty() {
+                                let findings = self.run_mid_flow_review(&diff, step, options).await;
+                                if !findings.is_empty() {
+                                    let findings_text = findings.iter()
+                                        .map(|f| format!(
+                                            "[{}] {}:{} - {}\n  suggestion: {}",
+                                            f.severity.to_uppercase(),
+                                            f.file_path,
+                                            f.line.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string()),
+                                            f.description,
+                                            f.suggestion
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    let review_msg = format!(
+                                        "## Mid-Flow Review Findings\n\
+                                         The following issues were detected in your recent changes. \
+                                         Please fix them before continuing:\n\n{}",
+                                        findings_text
+                                    );
+                                    self.push_ephemeral("user", &review_msg);
+                                }
+                            }
+                        }
+                    }
+
+                    push_event(&mut events, AgentEvent::ToolResult {
+                        step,
+                        tool_name: rt.name.clone(),
+                        success: result.success,
+                        output: result.output.clone(),
+                    }, self.config.max_events);
+
+                    // C2: 跟踪连续工具失败
+                    if result.success {
+                        consecutive_tool_failures = 0;
+                    } else {
+                        consecutive_tool_failures += 1;
+                        if consecutive_tool_failures >= 2 {
+                            let replan_msg = "前两步工具调用连续失败。请重新评估当前计划，如果当前路径不可行，请使用 ## 计划 重新规划。";
+                            self.emit(AgentEvent::Thought {
+                                step,
+                                content: format!("[replan] {}", replan_msg),
+                            }).await;
+                            self.push_ephemeral("user", replan_msg);
+                            consecutive_tool_failures = 0;
+                        }
+                    }
+
+                    if rt.approve_all {
+                        self.emit(AgentEvent::Approval {
+                            tool_name: rt.name.clone(),
+                            decision: "approved_all".to_string(),
+                            message: "Approved and will auto-approve subsequent calls".to_string(),
+                        }).await;
+                    }
+
+                    if let Some(msg) = &rt.suggest_msg {
+                        self.push_ephemeral("user", msg);
+                    }
+                }
+
+                // P3-2: 检查 terminate — 若同批所有原始 tool_call 均产生结果且均为 terminate=true，结束 agent 循环
+                // results 只包含进入 ready_tools 的执行结果；预检失败（解析/ForceSkip/沙箱/审批）不进入 ready_tools，
+                // 但预检失败必有非 terminate 结果，因此 results.len() != original_tool_call_count 时不可终止。
+                let all_terminate = results.len() == original_tool_call_count && results.iter().all(|r| r.terminate);
+                if all_terminate {
+                    let terminate_answer = last_answer_text.clone();
+                    self.emit(AgentEvent::Finished {
+                        answer: terminate_answer.clone(),
+                        steps: step + 1,
+                    }).await;
+                    Self::persist_event(&persistence, step, None, TaskStatus::Completed, "Terminated by tool".to_string()).await;
+                    Self::mark_checkpoint_completed(&checkpoint, session_id).await;
+                    return Ok(AgentRunResult {
+                        answer: terminate_answer,
+                        steps_taken: step + 1,
+                        tool_calls: tool_calls_count,
+                        events,
+                    });
                 }
             }
 
@@ -1537,10 +1679,7 @@ impl ReActAgent {
                     deduper.no_progress_count
                 );
                 self.emit(AgentEvent::Thought { step, content: msg.clone() }).await;
-                self.conversation
-                    .add_message(session_id, "user", &msg, None, None)
-                    .await
-                    .map_err(|e| AgentError::Tool(e.to_string()))?;
+                self.push_ephemeral("user", &msg);
             }
 
             // C4: 持久化本步事件（fire-and-forget）
@@ -1619,12 +1758,29 @@ impl ReActAgent {
             tool_calls: tool_calls_count,
             events,
         })
+    }.await;
+
+    // Started 后出现未捕获的错误时，确保桌面端收到 Error 事件
+    if let Err(ref e) = core_result {
+        match e {
+            AgentError::Cancelled => {
+                // Cancelled 事件已在内部发射，无需重复
+            }
+            _ => {
+                self.emit(AgentEvent::Error {
+                    message: e.to_string(),
+                }).await;
+            }
+        }
     }
 
-    /// 调用 LLM：尝试流式输出 token，失败时回退到非流式调用
+    core_result
+}
+
+/// 调用 LLM：尝试流式输出 token，失败时回退到非流式调用
     ///
     /// 流式模式下：
-    /// - 每个文本 chunk 按空格分词后逐词 emit `MessageDelta`
+    /// - 按 Provider 文本 chunk 粒度 emit `MessageDelta`
     /// - 流式结束后 emit `Usage`（从最后一个 chunk 提取）
     /// - 失败时回退到非流式调用
     async fn call_llm_with_streaming(
@@ -1639,6 +1795,8 @@ impl ReActAgent {
                 .map_err(|e| AgentError::Llm(e.to_string()));
         }
 
+        let call_start = std::time::Instant::now();
+
         // 尝试流式调用
         match self.provider.chat_stream(messages, tools, options).await {
             Ok(mut stream) => {
@@ -1649,10 +1807,20 @@ impl ReActAgent {
                 let mut tool_call_builders: BTreeMap<u32, ToolCallBuilder> = BTreeMap::new();
                 let mut final_usage: Option<(u64, u64)> = None; // (input_tokens, output_tokens)
                 let mut final_finish_reason: Option<String> = None; // 用于 M4 截断恢复
+                let mut agent_chunk_count: usize = 0;
+                let mut agent_delta_count: usize = 0;
 
                 while let Some(chunk) = stream.next().await {
+                    if self.cancellation.is_cancelled() {
+                        self.emit(AgentEvent::Cancelled {
+                            partial_answer: full_content,
+                        }).await;
+                        return Err(AgentError::Cancelled);
+                    }
+
                     match chunk {
                         Ok(sc) => {
+                            agent_chunk_count += 1;
                             // Capture usage if present in this chunk
                             if let Some(ref usage_info) = sc.usage {
                                 final_usage = Some((
@@ -1669,16 +1837,14 @@ impl ReActAgent {
                             }
 
                             for choice in sc.choices {
-                                // 累加文本内容并发射逐词 MessageDelta 事件
+                                // 累加文本内容并发射按 Provider chunk 粒度的 MessageDelta 事件
                                 if let Some(ref content) = choice.delta.content {
                                     full_content.push_str(content);
-                                    // M7 改进: 按字符逐字 emit，避免空格 split 在 CJK 文本中无用
-                                    // 且避免 chunk 边界处的多余空格 (old: split(' ') → "你好 世界")
-                                    for ch in content.chars() {
-                                        self.emit(AgentEvent::MessageDelta {
-                                            delta: ch.to_string(),
-                                        }).await;
-                                    }
+                                    agent_delta_count += 1;
+                                    // 按 Provider 文本 chunk 推送，不再拆为单字符
+                                    self.emit(AgentEvent::MessageDelta {
+                                        delta: content.clone(),
+                                    }).await;
                                 }
                                 // 累加工具调用 delta
                                 if let Some(tc_deltas) = &choice.delta.tool_calls {
@@ -1700,14 +1866,29 @@ impl ReActAgent {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Stream chunk error: {}, falling back to non-streaming", e);
+                            let elapsed = call_start.elapsed();
+                            tracing::warn!(
+                                agent_chunk_count = agent_chunk_count,
+                                char_count = full_content.chars().count(),
+                                elapsed_ms = elapsed.as_millis() as u64,
+                                "Stream chunk error: {}, falling back to non-streaming",
+                                e
+                            );
                             return self.provider.chat(messages, tools, options).await
                                 .map_err(|e| AgentError::Llm(e.to_string()));
                         }
                     }
                 }
 
-                // Emit Usage event after streaming completes
+                let elapsed = call_start.elapsed();
+                tracing::debug!(
+                    agent_chunk_count = agent_chunk_count,
+                    char_count = full_content.chars().count(),
+                    agent_delta_count = agent_delta_count,
+                    finish_reason = ?final_finish_reason,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "streaming finished successfully"
+                );
                 if let Some((input_tokens, output_tokens)) = final_usage {
                     self.emit(AgentEvent::Usage {
                         input_tokens,
@@ -1754,6 +1935,28 @@ impl ReActAgent {
         }
     }
 
+    /// 封装 `call_llm_with_streaming` 并应用看门狗超时。
+    ///
+    /// 每次尝试使用 `watchdog_timeout_secs` 作为总 deadline。
+    async fn call_llm_with_deadline(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        step: usize,
+        options: &ChatOptions,
+    ) -> Result<ChatResponse, AgentError> {
+        match tokio::time::timeout(
+            Duration::from_secs(self.config.watchdog_timeout_secs),
+            self.call_llm_with_streaming(messages, tools, step, options),
+        ).await {
+            Ok(result) => result,
+            Err(_) => Err(AgentError::Llm(format!(
+                "LLM 调用超时（{} 秒）",
+                self.config.watchdog_timeout_secs
+            ))),
+        }
+    }
+
     async fn build_messages(&self, session_id: &str, system_prompt: &str) -> Result<Vec<ChatMessage>, AgentError> {
         let mut messages = vec![ChatMessage {
             role: Role::System,
@@ -1780,7 +1983,17 @@ impl ReActAgent {
             };
 
             let tool_calls: Option<Vec<ToolCallDef>> = record.tool_calls
-                .and_then(|tc| serde_json::from_str(&tc).ok());
+                .and_then(|tc| serde_json::from_str::<Vec<ToolCallDef>>(&tc).ok())
+                .map(|calls| {
+                    calls
+                        .into_iter()
+                        .map(|mut c| {
+                            c.function.arguments =
+                                sanitize_tool_arguments_json(&c.function.arguments);
+                            c
+                        })
+                        .collect()
+                });
 
             messages.push(ChatMessage {
                 role,
@@ -1789,6 +2002,27 @@ impl ReActAgent {
                 tool_call_id: record.tool_call_id,
                 tool_calls,
             });
+        }
+
+        // P1: 追加当前 Agent run 的临时上下文（错误提示、断点续传提示等），
+        // 这些消息只影响模型上下文，不写入 conversation 数据库。
+        if let Ok(ctx) = self.ephemeral_context.lock() {
+            for (role, content) in ctx.iter() {
+                let role = match role.as_str() {
+                    "system" => Role::System,
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    "tool" => Role::Tool,
+                    _ => Role::User,
+                };
+                messages.push(ChatMessage {
+                    role,
+                    content: MessageContent::Text(content.clone()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                });
+            }
         }
 
         Ok(messages)
@@ -1949,7 +2183,7 @@ impl ReActAgent {
     /// M13 验证阻断: Agent 声称完成前自动运行项目验证（对标 OpenCode/Claude Code Stop Hook）
     async fn run_verification_hook(
         &self,
-        session_id: &str,
+        _session_id: &str,
         workspace: &str,
         step: usize,
     ) {
@@ -2020,9 +2254,9 @@ impl ReActAgent {
 
                         self.emit(AgentEvent::Thought { step, content: msg.clone() }).await;
 
-                        // 编译/测试失败：注入 observation 阻止完成
+                        // 编译/测试失败：注入临时上下文阻止完成（不污染会话历史）
                         if *category != "LINT" {
-                            let _ = self.conversation.add_message(session_id, "user", &msg, None, None).await;
+                            self.push_ephemeral("user", &msg);
                             all_passed = false;
                             break;
                         }
@@ -2042,7 +2276,7 @@ impl ReActAgent {
                     // C3: 命令不存在（如 cargo/npm 未安装）视为验证失败
                     if *category != "LINT" {
                         let fail_msg = format!("[verify] ✗ {} FAILED (command not found or error)\n{}", category, e);
-                        let _ = self.conversation.add_message(session_id, "user", &fail_msg, None, None).await;
+                        self.push_ephemeral("user", &fail_msg);
                         all_passed = false;
                         break;
                     }
@@ -2104,11 +2338,37 @@ impl ReActAgent {
                        (React, Vue, Angular, etc.), you MUST rewrite using the correct \
                        toolchain (e.g. `npm create vite`, `create-react-app`, etc.).";
             self.emit(AgentEvent::Thought { step, content: msg.to_string() }).await;
-            let _ = self.conversation.add_message(session_id, "user", msg, None, None).await;
+            self.push_ephemeral("user", msg);
         }
     }
 
     pub(crate) async fn emit(&self, event: AgentEvent) {
+        // M17: 终态事件日志——辅助区分 Provider 无首块 / 前端未更新等场景
+        match &event {
+            AgentEvent::Finished { answer, steps } => {
+                tracing::info!(
+                    event = "Finished",
+                    answer_len = answer.len(),
+                    steps = steps,
+                    "Agent finished"
+                );
+            }
+            AgentEvent::Error { message } => {
+                tracing::warn!(
+                    event = "Error",
+                    message = %message,
+                    "Agent error"
+                );
+            }
+            AgentEvent::Cancelled { partial_answer } => {
+                tracing::warn!(
+                    event = "Cancelled",
+                    partial_len = partial_answer.len(),
+                    "Agent cancelled"
+                );
+            }
+            _ => {}
+        }
         let (event_type, data) = match &event {
             AgentEvent::Started { .. } => (EventType::SubAgentSpawned, serde_json::to_value(&event)),
             AgentEvent::Thought { .. } => (EventType::LlmStreamChunk, serde_json::to_value(&event)),
@@ -2126,7 +2386,15 @@ impl ReActAgent {
             AgentEvent::StepCompleted { .. } | AgentEvent::Message { .. } => (EventType::PlanExecuting, serde_json::to_value(&event)),
             AgentEvent::FileChanged { .. } => (EventType::ToolCallResult, serde_json::to_value(&event)),
         };
-        let _ = self.event_bus.emit(event_type, "agent", data.unwrap_or_default());
+        let mut data = data.unwrap_or_default();
+        // 注入 session_id（参考 lib.rs 桥接线程注入 source 的模式），
+        // 让前端按 session_id 路由事件到对应会话状态
+        if let Some(sid) = &self.session_id {
+            if let serde_json::Value::Object(ref mut map) = data {
+                map.insert("session_id".to_string(), serde_json::Value::String((**sid).clone()));
+            }
+        }
+        let _ = self.event_bus.emit(event_type, "agent", data);
     }
 
     fn tools_description(&self) -> String {
@@ -2207,15 +2475,86 @@ impl ToolCallBuilder {
     fn build(self) -> Option<ToolCallDef> {
         let id = self.id?;
         let name = self.name?;
+        let arguments = sanitize_tool_arguments_json(&self.arguments);
         Some(ToolCallDef {
             id,
             call_type: "function".to_string(),
             function: crate::provider::provider::FunctionCall {
                 name,
-                arguments: self.arguments,
+                arguments,
             },
         })
     }
+}
+
+/// 确保 tool call arguments 是合法 JSON 字符串。
+/// 部分模型/网关会返回空串、半截 JSON 或已是 object 的二次序列化碎片，
+/// 原样回传会触发 400: function.arguments must be in JSON format。
+fn sanitize_tool_arguments_json(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+    // 尝试从碎片中截取首个 JSON object/array
+    if let Some(start) = trimmed.find(['{', '[']) {
+        let slice = &trimmed[start..];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
+            return v.to_string();
+        }
+        // 括号配平截取
+        if let Some(end) = find_json_end(slice) {
+            let candidate = &slice[..=end];
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
+                return v.to_string();
+            }
+        }
+    }
+    // 兜底：包成空对象，避免把非法串送进下一轮请求
+    tracing::warn!(
+        "tool arguments 非合法 JSON，已降级为 {{}}。原始: {}",
+        &trimmed.chars().take(200).collect::<String>()
+    );
+    "{}".to_string()
+}
+
+fn find_json_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let open = bytes.first()?;
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b if b == *open => depth += 1,
+            b if b == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 完成检测：延续标记（文本暗示"还没说完，继续干"）
@@ -2610,6 +2949,34 @@ async fn watch_cancellation(token: &CancellationToken) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod sanitize_args_tests {
+    use super::sanitize_tool_arguments_json;
+
+    #[test]
+    fn empty_becomes_object() {
+        assert_eq!(sanitize_tool_arguments_json(""), "{}");
+        assert_eq!(sanitize_tool_arguments_json("   "), "{}");
+    }
+
+    #[test]
+    fn valid_json_passthrough() {
+        let raw = r#"{"command":"ls"}"#;
+        assert_eq!(sanitize_tool_arguments_json(raw), raw);
+    }
+
+    #[test]
+    fn extracts_embedded_object() {
+        let raw = r#"noise {"a":1} trailing"#;
+        assert_eq!(sanitize_tool_arguments_json(raw), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn garbage_falls_back() {
+        assert_eq!(sanitize_tool_arguments_json("not-json"), "{}");
     }
 }
 

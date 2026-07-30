@@ -19,6 +19,8 @@ const mockConfigStore = vi.hoisted(() => ({
 const mockSessionStore = vi.hoisted(() => ({
   activeSessionId: "",
   setActiveSessionId: vi.fn(),
+  renameSession: vi.fn().mockResolvedValue(undefined),
+  sessions: [] as { id: string; title: string }[],
 }));
 
 const mockChatStore = vi.hoisted(() => ({
@@ -31,6 +33,11 @@ const mockChatStore = vi.hoisted(() => ({
   draft: "",
   setDraft: vi.fn(),
   focusInputTrigger: 0,
+  fileRefs: [] as { id: string; name: string; path: string }[],
+  addFileRef: vi.fn(),
+  removeFileRef: vi.fn(),
+  clearFileRefs: vi.fn(),
+  ensureSession: vi.fn(),
 }));
 
 const mockSkillStore = vi.hoisted(() => ({
@@ -57,9 +64,18 @@ vi.mock("../../stores/sessionStore", () => ({
   useSessionStore: () => mockSessionStore,
 }));
 
-vi.mock("../../stores/chatStore", () => ({
-  useChatStore: () => mockChatStore,
-}));
+vi.mock("../../stores/chatStore", () => {
+  const useChatStore = Object.assign(() => mockChatStore, {
+    getState: () => mockChatStore,
+  });
+  return {
+    useChatStore,
+    useActiveSessionState: () => ({
+      isStreaming: mockChatStore.isStreaming,
+      fileRefs: mockChatStore.fileRefs,
+    }),
+  };
+});
 
 vi.mock("../../stores/skillStore", () => ({
   useSkillStore: () => mockSkillStore,
@@ -96,6 +112,7 @@ describe("InputPanel", () => {
     mockConfigStore.loadProviders.mockReset();
     mockSessionStore.activeSessionId = "";
     mockSessionStore.setActiveSessionId.mockReset();
+    mockChatStore.isStreaming = false;
     mockChatStore.setStreaming.mockReset();
     mockChatStore.addUserMessage.mockReset();
     mockChatStore.addSystemMessage.mockReset();
@@ -103,6 +120,11 @@ describe("InputPanel", () => {
     mockChatStore.cancelAgent.mockReset();
     mockChatStore.draft = "";
     mockChatStore.setDraft.mockReset();
+    mockChatStore.fileRefs = [];
+    mockChatStore.addFileRef.mockReset();
+    mockChatStore.removeFileRef.mockReset();
+    mockChatStore.clearFileRefs.mockReset();
+    mockChatStore.ensureSession.mockReset();
     mockSkillStore.skills = [];
     mockSkillStore.loadSkills.mockReset();
     mockSkillStore.readSkill.mockReset();
@@ -110,7 +132,13 @@ describe("InputPanel", () => {
     tauriInvokeMock.mockResolvedValue({ session_id: "s-1", message: "ok" });
   });
 
-  it("does not send thinking_level field when level is Default", async () => {
+  it("does not show the global focus-visible outline on the chat textarea", () => {
+    render(<InputPanel />);
+
+    expect(screen.getByRole("textbox")).toHaveClass("focus-visible:outline-none");
+  });
+
+  it("sends the default request shape without thinking_level", async () => {
     setCurrentProvider("Alpha", "a-model");
     render(<InputPanel />);
 
@@ -119,8 +147,11 @@ describe("InputPanel", () => {
     fireEvent.keyDown(textarea, { key: "Enter" });
 
     await waitFor(() => expect(tauriInvokeMock).toHaveBeenCalled());
-    const payload = tauriInvokeMock.mock.calls[0][1] as Record<string, unknown>;
-    expect(payload).not.toHaveProperty("thinking_level");
+    expect(tauriInvokeMock).toHaveBeenCalledWith("send_prompt", {
+      request: expect.objectContaining({ prompt: "hello", mode: "agent" }),
+    });
+    const request = tauriInvokeMock.mock.calls[0][1].request as Record<string, unknown>;
+    expect(request).not.toHaveProperty("thinking_level");
   });
 
   it("sends thinking_level when a non-default level is selected", async () => {
@@ -139,8 +170,8 @@ describe("InputPanel", () => {
     fireEvent.keyDown(textarea, { key: "Enter" });
 
     await waitFor(() => expect(tauriInvokeMock).toHaveBeenCalled());
-    const payload = tauriInvokeMock.mock.calls[0][1] as Record<string, unknown>;
-    expect(payload.thinking_level).toBe("high");
+    const request = tauriInvokeMock.mock.calls[0][1].request as Record<string, unknown>;
+    expect(request.thinking_level).toBe("high");
   });
 
   it("passes thinking_level through slash-skill send_prompt path", async () => {
@@ -164,10 +195,40 @@ describe("InputPanel", () => {
     fireEvent.keyDown(textarea, { key: "Enter" });
 
     await waitFor(() => expect(tauriInvokeMock).toHaveBeenCalled());
-    const payload = tauriInvokeMock.mock.calls[0][1] as Record<string, unknown>;
-    expect(payload.thinking_level).toBe("medium");
-    expect(typeof payload.prompt).toBe("string");
-    expect(payload.prompt).toContain("SKILL BODY");
+    const request = tauriInvokeMock.mock.calls[0][1].request as Record<string, unknown>;
+    expect(request.thinking_level).toBe("medium");
+    expect(typeof request.prompt).toBe("string");
+    expect(request.prompt).toContain("SKILL BODY");
+  });
+
+  it("sends the active session ID inside request", async () => {
+    setCurrentProvider("Alpha", "a-model");
+    mockSessionStore.activeSessionId = "session-1";
+    render(<InputPanel />);
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() => expect(tauriInvokeMock).toHaveBeenCalledWith("send_prompt", {
+      request: expect.objectContaining({ session_id: "session-1" }),
+    }));
+  });
+
+  it("renames a default session from the first user message", async () => {
+    setCurrentProvider("Alpha", "a-model");
+    mockSessionStore.activeSessionId = "session-1";
+    mockSessionStore.sessions = [{ id: "session-1", title: "New Session" }];
+    render(<InputPanel />);
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "你好，帮我分析这个项目" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() => expect(mockSessionStore.renameSession).toHaveBeenCalledWith(
+      "session-1",
+      "你好，帮我分析这..."
+    ));
   });
 
   it("renders top textarea row with Plus and send button, bottom toolbar with mode, model, thinking", () => {
@@ -219,5 +280,39 @@ describe("InputPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "切换模型" }));
     fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
     expect(screen.queryByText("管理模型")).not.toBeInTheDocument();
+  });
+
+  it("renders file ref chips when fileRefs exist", () => {
+    mockChatStore.fileRefs = [
+      { id: "f1", name: "test.ts", path: "src/test.ts" },
+    ];
+    render(<InputPanel />);
+    expect(screen.getByText("test.ts")).toBeInTheDocument();
+  });
+
+  it("includes file refs in prompt on send", async () => {
+    mockChatStore.fileRefs = [
+      { id: "f1", name: "test.ts", path: "src/test.ts" },
+    ];
+    render(<InputPanel />);
+
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "帮我看看这个文件" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(mockChatStore.addUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining("帮我看看这个文件")
+      );
+    });
+    expect(mockChatStore.addUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("src/test.ts")
+    );
+    await waitFor(() => {
+      expect(tauriInvokeMock).toHaveBeenCalledWith("send_prompt", {
+        request: expect.objectContaining({ prompt: expect.stringContaining("src/test.ts") }),
+      });
+    });
+    expect(mockChatStore.clearFileRefs).toHaveBeenCalled();
   });
 });

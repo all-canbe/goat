@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Sparkles, Code2, Bug, ListChecks, Slash, Layers, X } from "lucide-react";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, useActiveSessionState, type ChatMessage } from "../../stores/chatStore";
 import MessageBubble from "./MessageBubble";
 import StreamingThought from "./StreamingThought";
 
@@ -12,14 +12,22 @@ const EXAMPLE_PROMPTS = [
   { icon: ListChecks, text: "列出待办事项" },
 ];
 
-const AGENT_MESSAGE_TYPES = new Set(["assistant", "tool_call", "tool_result"]);
-
-function isAgentMessage(type: string): boolean {
-  return AGENT_MESSAGE_TYPES.has(type);
+/** 连续 agent 段内仅第一条 assistant 显示头像（中间的 tool 卡不打断段） */
+export function shouldShowAvatar(messages: ChatMessage[], index: number): boolean {
+  const msg = messages[index];
+  if (!msg || msg.type !== "assistant") return false;
+  for (let i = index - 1; i >= 0; i--) {
+    const t = messages[i].type;
+    if (t === "assistant") return false;
+    if (t === "tool_call" || t === "tool_result") continue;
+    return true;
+  }
+  return true;
 }
 
 export default function MessageList() {
-  const { messages, streamingContent, isStreaming, setDraft, compactionNotices, dismissCompactionNotice } = useChatStore();
+  const { messages, streamingContent, isStreaming, compactionNotices } = useActiveSessionState();
+  const { setDraft, dismissCompactionNotice } = useChatStore();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -30,7 +38,14 @@ export default function MessageList() {
   const latestNotice = compactionNotices[compactionNotices.length - 1];
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-3 pb-32 flex flex-col gap-1">
+    <div
+      data-testid="message-list-scroll"
+      className="flex-1 overflow-y-auto px-4 py-3 pb-56"
+    >
+      <div
+        data-testid="chat-content-column"
+        className="w-full max-w-[840px] mx-auto flex min-h-full flex-col gap-1"
+      >
       {/* P1: 上下文压缩通知条（醒目展示，可关闭） */}
       {latestNotice && (
         <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-md bg-primary-subtle border border-primary/30 text-brand text-xs">
@@ -76,21 +91,21 @@ export default function MessageList() {
         </div>
       )}
 
-      {messages.map((msg, index) => {
-        const prevMsg = messages[index - 1];
-        const showDivider = prevMsg && isAgentMessage(prevMsg.type) && isAgentMessage(msg.type);
-        return showDivider ? (
-          <div key={msg.id} className="border-t border-divider">
-            <MessageBubble message={msg} />
-          </div>
-        ) : (
-          <MessageBubble key={msg.id} message={msg} />
-        );
-      })}
+      {/* 时间线：文字与工具卡按 messages 顺序交错渲染；连续 agent 段仅首条头像 */}
+      {messages.map((msg, index) => (
+        <MessageBubble
+          key={msg.id}
+          message={msg}
+          showAvatar={shouldShowAvatar(messages, index)}
+        />
+      ))}
 
-      {streamingContent && <StreamingThought content={streamingContent} />}
+      {(streamingContent || isStreaming) && (
+        <StreamingThought content={streamingContent} waiting={isStreaming && !streamingContent} />
+      )}
 
       <div ref={bottomRef} />
+      </div>
     </div>
   );
 }

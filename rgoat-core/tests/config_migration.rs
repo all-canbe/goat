@@ -4,11 +4,36 @@
 
 use rgoat_core::core::config::Settings;
 use serde_json::json;
+use std::path::PathBuf;
+
+/// Write `contents` to a `setting.json` inside a fresh TempDir and return
+/// `(tempdir, path)`. The caller must keep the TempDir alive for the test
+/// duration so the file is not cleaned up mid-assertion. Using a fixture
+/// avoids reading the real user `~/.goat/setting.json`, which made these
+/// tests environment-dependent.
+fn write_settings_fixture(contents: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("setting.json");
+    std::fs::write(&path, contents).expect("write fixture");
+    (dir, path)
+}
 
 /// 测试原版 Goat setting.json 能被正确加载和迁移
 #[test]
 fn test_load_original_goat_config() {
-    let settings = Settings::load().expect("Failed to load settings.json");
+    // 旧版格式：顶层 base_url（含 xiaomimimo）+ api_key（tp- 前缀）+ model，
+    // 无 providers 数组；provider 字段为类型名 "openai_compatible"，
+    // 迁移应从 URL 提取有意义的 provider 名称 → "mimo"。
+    let (_dir, path) = write_settings_fixture(
+        r#"{
+            "provider": "openai_compatible",
+            "base_url": "https://api.xiaomimimo.cloud/v1",
+            "api_key": "tp-abcdef123456",
+            "model": "mimo-v2.5-pro"
+        }"#,
+    );
+
+    let settings = Settings::load_from_path(&path).expect("load_from_path");
 
     // ── 迁移后 providers 不应为空 ──
     assert!(
@@ -17,9 +42,6 @@ fn test_load_original_goat_config() {
     );
 
     let p = &settings.providers[0];
-    println!("Provider name: {}", p.name);
-    println!("Provider model: {:?}", p.models);
-    println!("Provider type: {:?}", p.provider_type);
 
     // ── provider name 应从 URL 提取（xiaomimimo → mimo）──
     assert_eq!(p.name, "mimo", "Provider name should be extracted from URL");
@@ -57,20 +79,42 @@ fn test_load_original_goat_config() {
 /// 测试附加字段被保留
 #[test]
 fn test_extra_fields_preserved() {
-    let settings = Settings::load().expect("Failed to load settings");
+    // 旧版格式同时携带 review/sub 模型、hooks 与 workspace 等附加字段。
+    // 迁移应将 base_url/api_key/model 移入 providers，但保留这些顶层附加字段。
+    let (_dir, path) = write_settings_fixture(
+        r#"{
+            "provider": "openai_compatible",
+            "base_url": "https://api.xiaomimimo.cloud/v1",
+            "api_key": "tp-main-key-123",
+            "model": "mimo-v2.5-pro",
+            "sub_model": "mimo-v2.5-flash",
+            "review_model": "mimo-v2.5-pro",
+            "review_api_key": "tp-review-key-456",
+            "review_base_url": "https://api.xiaomimimo.cloud/v1",
+            "max_concurrency": 3,
+            "max_depth": 3,
+            "hooks": {"tool": ["echo hi"]},
+            "workspace": "/tmp/goat-ws"
+        }"#,
+    );
+
+    let settings = Settings::load_from_path(&path).expect("load_from_path");
 
     assert!(settings.sub_model.is_some(), "sub_model should be preserved");
+    assert_eq!(settings.sub_model.as_deref().unwrap(), "mimo-v2.5-flash");
     assert!(settings.review_model.is_some(), "review_model should be preserved");
+    assert_eq!(settings.review_model.as_deref().unwrap(), "mimo-v2.5-pro");
     assert!(settings.review_api_key.is_some(), "review_api_key should be preserved");
+    assert!(
+        settings.review_api_key.as_deref().unwrap().starts_with("tp-"),
+        "review_api_key should keep its value"
+    );
     assert!(settings.review_base_url.is_some(), "review_base_url should be preserved");
     assert_eq!(settings.max_concurrency, 3);
     assert_eq!(settings.max_depth, 3);
     assert!(settings.hooks.is_some(), "hooks should be preserved");
     assert!(settings.workspace.is_some(), "workspace should be preserved");
-
-    println!("sub_model: {}", settings.sub_model.unwrap());
-    println!("review_model: {}", settings.review_model.unwrap());
-    println!("workspace: {}", settings.workspace.unwrap());
+    assert_eq!(settings.workspace.as_deref().unwrap(), "/tmp/goat-ws");
 }
 
 /// 旧版 JSON 未包含 enabled 字段时，Provider 默认启用。

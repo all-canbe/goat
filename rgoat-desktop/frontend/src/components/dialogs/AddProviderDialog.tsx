@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { X } from "lucide-react";
 import ProviderForm from "../provider/ProviderForm";
 
@@ -11,28 +10,10 @@ export default function AddProviderDialog({
   isOpen,
   onClose,
 }: AddProviderDialogProps) {
-  // Esc 关闭
-  useEffect(() => {
-    if (!isOpen) return;
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
-
   if (!isOpen) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div
         role="dialog"
         aria-modal="true"
@@ -45,7 +26,8 @@ export default function AddProviderDialog({
           </span>
           <button
             onClick={onClose}
-            title="关闭 (Esc)"
+            aria-label="关闭"
+            title="关闭"
             className="p-1 rounded text-text-secondary hover:text-text hover:bg-surface-hover transition-colors"
           >
             <X size={16} />

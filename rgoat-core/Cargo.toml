@@ -50,8 +50,11 @@ pin-project-lite = "0.2"
 # 重试
 backon = "1"
 
-# 内容处理
-sha2 = "0.10"
+# URL 解析（SSRF 保护用）
+url = "2"
+
+# Shell 风格参数分词
+shlex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

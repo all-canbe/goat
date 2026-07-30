@@ -28,6 +28,7 @@ use rgoat_core::mcp::server::{GoatMcpServer, run_stdio_server};
 
 mod app;
 mod components;
+mod keybindings;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

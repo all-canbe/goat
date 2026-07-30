@@ -82,8 +82,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   configureProvider: async (base_url, api_key, model, name) => {
     await tauriInvoke("configure_provider", {
-      base_url,
-      api_key,
+      baseUrl: base_url,
+      apiKey: api_key,
       model,
       name,
     });

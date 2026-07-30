@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,9 +44,12 @@ use rgoat_core::core::cancellation::CancellationToken;
 use rgoat_core::core::event_bus::Event as BusEvent;
 use rgoat_core::provider::switch::ProviderSwitch;
 use rgoat_core::provider::provider::LlmProvider;
+use rgoat_core::provider::provider::{ChatOptions, ThinkingLevel};
 use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalResponder, ApprovalScope};
 
 use crate::components::approval_dialog::{ApprovalChoice, ApprovalDialog, ApprovalRequest};
+use crate::components::settings_dialog::{ItemKind, SettingsDialog, SettingsItem};
+use crate::keybindings::{load_keybindings, render_hotkeys, KeyMap};
 
 /// TUI focus target — determines which area receives navigation keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +195,24 @@ impl UiElement {
     }
 }
 
+// ── Message Queue (P2: pi 风格消息队列) ──
+
+/// 排队消息的种类。steering 优先于 follow_up 交付。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QKind {
+    /// 在当前 agent 轮次结束后立即交付（高优先级）。
+    Steering,
+    /// 在所有 steering 之后再交付（普通排队）。
+    FollowUp,
+}
+
+/// 等待交付的用户消息。
+#[derive(Debug, Clone)]
+struct QueuedMessage {
+    text: String,
+    kind: QKind,
+}
+
 // ── Application State ──
 
 struct App {
@@ -202,12 +224,14 @@ struct App {
 
     // Session
     session_id: String,
+    session_title: String,
     workspace: String,
 
     // Chat
     lines: Vec<UiElement>,
     input: String,
     mode: AgentMode,
+    thinking_level: ThinkingLevel,
     is_processing: bool,
     current_step: usize,
     max_steps: usize,
@@ -266,12 +290,28 @@ struct App {
     show_command_menu: bool,
     /// Current cursor position (char index, byte-safe) within input.
     input_cursor: usize,
+    /// Sticky visual column for vertical cursor movement (对齐 pi preferredVisualCol)。
+    /// 上下移动时保持视觉列；左右移动/插入/删除后重置为 None。
+    preferred_visual_col: Option<usize>,
+    // ── P2: Kill ring (Emacs-style Ctrl+K/Y/Alt+Y)，对齐 pi editor.ts ──
+    /// Kill ring，容量 10，最新在前。Ctrl+K 压入，Ctrl+Y 弹出，Alt+Y 轮转。
+    kill_ring: Vec<String>,
+    /// 上次 yank 的 (start_char, end_char)，用于 Alt+Y 替换。
+    last_yank: Option<(usize, usize)>,
+    // ── P2: Undo (Ctrl+Z)，对齐 pi editor.ts ──
+    /// Undo 栈，容量 50，存 (text, cursor) 快照。
+    undo_stack: Vec<(String, usize)>,
+    /// 上次操作类型，用于 undo coalescing（连续 word char 输入合并为一个 undo 单元）。
+    last_action_is_word_char: bool,
+    // ── P2: History (Up/Down)，对齐 pi editor.ts navigateHistory ──
+    /// 输入历史，容量 100，最新在前。
+    history: Vec<String>,
+    /// 当前浏览的历史索引，None = 不在浏览模式。
+    history_index: Option<usize>,
+    /// 进入 history 浏览前的草稿，Down 回到末尾时恢复。
+    history_draft: Option<String>,
     /// P1: track tool execution start times for elapsed time calculation
     tool_start_times: HashMap<String, Instant>,
-    /// Paste-burst guard: timestamp of the last input character / paste.
-    /// If Enter arrives within ~80 ms it is likely a terminal splitting a
-    /// multi-line paste — absorb it as a space instead of submitting.
-    last_input_time: Option<Instant>,
     /// Index of selected item in the command menu (-1 = none).
     command_menu_index: usize,
     /// Pre-loaded skills for /findskill command menu integration
@@ -288,6 +328,28 @@ struct App {
     sidebar_current_step: usize,
     /// Total step count for the sidebar (0 = unknown).
     sidebar_total_steps: usize,
+
+    // ── P2: Message Queue ──
+    /// 排队的用户消息（Enter 处理中 → steering；Alt+Enter → follow-up）。
+    message_queue: Vec<QueuedMessage>,
+    /// Finished 事件后待提交的 prompt（由 handle_agent_event 设置，事件循环消费）。
+    /// 用此字段把 sync 的 handle_agent_event 与 async 的 submit_prompt 解耦。
+    pending_submit: Option<String>,
+
+    // ── T1-#4: File picker (@ file reference) ──
+    file_picker_active: bool,
+    file_picker_query: String,
+    file_picker_matches: Vec<PathBuf>,
+    file_picker_index: usize,
+    /// Char index of the '@' trigger character in the input string.
+    /// 语义与 `input_cursor` 一致（char index），所有 byte 操作通过 char_indices 转换。
+    file_picker_trigger_pos: usize,
+
+    // ── T3-#15: Settings dialog ──
+    settings_dialog: Option<SettingsDialog>,
+
+    // ── T3-#17: Keybindings (loaded from ~/.goat/keybindings.json) ──
+    keybindings: Option<KeyMap>,
 }
 
 /// Helper: load skills from filesystem, returning (name, description) pairs for the command menu.
@@ -357,10 +419,12 @@ impl App {
             switch,
             review_provider,
             session_id: String::new(),
+            session_title: String::new(),
             workspace,
             lines: Vec::new(),
             input: String::new(),
             mode,
+            thinking_level: ThinkingLevel::Default,
             is_processing: false,
             current_step: 0,
             max_steps: 50,
@@ -389,8 +453,15 @@ impl App {
             streaming_idx: None,
             show_command_menu: false,
             input_cursor: 0,
+            preferred_visual_col: None,
+            kill_ring: Vec::new(),
+            last_yank: None,
+            undo_stack: Vec::new(),
+            last_action_is_word_char: false,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: None,
             tool_start_times: HashMap::new(),
-            last_input_time: None,
             command_menu_index: 0,
             loaded_skills: Vec::new(),
             // ── D4 ──
@@ -399,6 +470,18 @@ impl App {
             sidebar_recent_tools: Vec::new(),
             sidebar_current_step: 0,
             sidebar_total_steps: 0,
+            // ── P2 ──
+            message_queue: Vec::new(),
+            pending_submit: None,
+            // ── T1-#4 ──
+            file_picker_active: false,
+            file_picker_query: String::new(),
+            file_picker_matches: Vec::new(),
+            file_picker_index: 0,
+            file_picker_trigger_pos: 0,
+            // ── T3 ──
+            settings_dialog: None,
+            keybindings: load_keybindings(),
         }
     }
 
@@ -411,6 +494,7 @@ impl App {
         match self.conversation.create_session(None, Some(&self.workspace)).await {
             Ok(s) => {
                 self.session_id = s.id;
+                self.session_title = s.title.clone();
                 self.add_line(UiElement::System {
                     text: format!("Session started. Mode: {}", self.mode_display()),
                 });
@@ -453,6 +537,17 @@ impl App {
         self.status_msg = format!("Mode: {}", self.mode_display());
     }
 
+    fn cycle_thinking(&mut self) {
+        self.thinking_level = match self.thinking_level {
+            ThinkingLevel::Default => ThinkingLevel::Low,
+            ThinkingLevel::Low => ThinkingLevel::Medium,
+            ThinkingLevel::Medium => ThinkingLevel::High,
+            ThinkingLevel::High => ThinkingLevel::Max,
+            ThinkingLevel::Max => ThinkingLevel::Default,
+        };
+        self.set_scroll_hint(format!("Thinking: {:?}", self.thinking_level));
+    }
+
     /// Return the current provider/model name for the status bar.
     fn model_name(&self) -> Option<String> {
         if self.current_provider.is_empty() {
@@ -471,6 +566,8 @@ impl App {
                 "idle".into()
             },
             model: self.model_name().unwrap_or_default(),
+            session_title: self.session_title.clone(),
+            thinking_level: format!("{:?}", self.thinking_level).to_lowercase(),
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             started_at: self.processing_start,
@@ -478,6 +575,7 @@ impl App {
             is_processing: self.is_processing,
             scroll_info: String::new(),
             focus: String::new(),
+            queued_count: self.message_queue.len(),
         }
     }
 
@@ -504,6 +602,163 @@ impl App {
         // will naturally push the viewport forward (no action needed).
     }
 
+    /// P2: 把消息加入队列，并在 chat 区显示一行提示。
+    fn enqueue_message(&mut self, kind: QKind, text: String) {
+        let preview = clip(&text.replace('\n', " "), 30);
+        let label = match kind {
+            QKind::Steering => "steering",
+            QKind::FollowUp => "follow-up",
+        };
+        self.add_line(UiElement::System {
+            text: format!("📨 Queued ({}): {}", label, preview),
+        });
+        self.message_queue.push(QueuedMessage { text, kind });
+        self.status_msg = format!("📨 {} queued ({} total)", label, self.message_queue.len());
+    }
+
+    /// P2: 把队列中所有消息合并回 input 框（用于中断后恢复）。
+    /// 若 input 已有草稿，以换行分隔追加。
+    fn restore_queue_to_input(&mut self) {
+        if self.message_queue.is_empty() {
+            return;
+        }
+        let restored: String = self.message_queue
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.input.is_empty() {
+            self.input = restored;
+        } else {
+            self.input.push('\n');
+            self.input.push_str(&restored);
+        }
+        self.input_cursor = self.input.chars().count();
+        let n = self.message_queue.len();
+        self.message_queue.clear();
+        self.add_line(UiElement::System {
+            text: format!("📨 Restored {} queued message(s) to input", n),
+        });
+    }
+
+    /// P2: 从队列末尾取回一条消息到 input 框（Alt+Up）。返回是否成功。
+    fn pop_queue_to_input(&mut self) -> bool {
+        if let Some(msg) = self.message_queue.pop() {
+            self.input = msg.text;
+            self.input_cursor = self.input.chars().count();
+            self.show_command_menu = self.input.starts_with('/');
+            self.status_msg = format!(
+                "📨 Popped queued message ({} left)",
+                self.message_queue.len()
+            );
+            true
+        } else {
+            self.status_msg = "No queued messages".to_string();
+            false
+        }
+    }
+
+    /// Insert pasted text at the cursor position, advancing the cursor by the
+    /// number of characters inserted.  Caller is responsible for length guards
+    /// and NUL/CRLF sanitization.  Multi-line pastes preserve newlines so the
+    /// editor supports true multi-line input (对齐 pi editor.ts bracketed paste)。
+    fn handle_paste(&mut self, text: &str) {
+        let char_count = self.input.chars().count();
+        if self.input_cursor > char_count {
+            self.input_cursor = char_count;
+        }
+        self.push_undo();
+        self.last_action_is_word_char = false;
+        let byte_pos = self.input
+            .char_indices()
+            .nth(self.input_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len());
+        self.input.insert_str(byte_pos, text);
+        self.input_cursor += text.chars().count();
+        self.show_command_menu = self.input.starts_with('/');
+    }
+
+    /// 在 cursor 处插入换行符 `\n`，cursor 前进到新行首。
+    /// 用于 Shift+Enter / `\+Enter` / 多行 paste 的换行插入。
+    /// 对齐 pi editor.ts `addNewLine`。
+    fn insert_newline_at_cursor(&mut self) {
+        let char_count = self.input.chars().count();
+        if self.input_cursor > char_count {
+            self.input_cursor = char_count;
+        }
+        self.push_undo();
+        self.last_action_is_word_char = false;
+        let byte_pos = self.input
+            .char_indices()
+            .nth(self.input_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len());
+        self.input.insert(byte_pos, '\n');
+        self.input_cursor += 1;
+        self.show_command_menu = false;
+    }
+
+    /// 压入 kill ring（容量 10，最新在前）。对齐 pi KillRing。
+    fn push_kill_ring(&mut self, text: String) {
+        if text.is_empty() { return; }
+        self.kill_ring.insert(0, text);
+        if self.kill_ring.len() > 10 { self.kill_ring.pop(); }
+    }
+
+    /// 压入 undo 快照（容量 50）。coalescing: 连续 word char 输入合并。
+    fn push_undo(&mut self) {
+        self.undo_stack.push((self.input.clone(), self.input_cursor));
+        if self.undo_stack.len() > 50 { self.undo_stack.remove(0); }
+    }
+
+    /// 添加输入历史（容量 100，去重连续重复）。对齐 pi addToHistory。
+    fn add_history(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() { return; }
+        if self.history.first().map(|s| s.as_str()) == Some(trimmed) { return; }
+        self.history.insert(0, trimmed.to_string());
+        if self.history.len() > 100 { self.history.pop(); }
+    }
+
+    /// History 导航：-1 = Up（更旧），1 = Down（更新）。对齐 pi navigateHistory。
+    fn navigate_history(&mut self, direction: i32) {
+        if self.history.is_empty() { return; }
+        let new_index = match self.history_index {
+            None => {
+                if direction == -1 {
+                    // 首次进入 history，保存草稿
+                    self.history_draft = Some(self.input.clone());
+                    Some(0)
+                } else {
+                    return; // Down 但未浏览，无操作
+                }
+            }
+            Some(idx) => {
+                let new_idx = idx as i32 + direction;
+                if new_idx < 0 { return; }
+                if new_idx as usize >= self.history.len() {
+                    // 超出范围，恢复草稿
+                    self.history_index = None;
+                    if let Some(draft) = self.history_draft.take() {
+                        self.input = draft;
+                        self.input_cursor = self.input.chars().count();
+                    }
+                    return;
+                }
+                Some(new_idx as usize)
+            }
+        };
+        self.history_index = new_index;
+        if let Some(idx) = new_index {
+            self.input = self.history[idx].clone();
+            self.input_cursor = self.input.chars().count();
+            self.show_command_menu = self.input.starts_with('/');
+        }
+        self.preferred_visual_col = None;
+        self.last_action_is_word_char = false;
+    }
+
     async fn submit(&mut self) {
         let prompt = std::mem::take(&mut self.input);
         // ★ 无论走哪条路径，先重置输入相关状态
@@ -512,6 +767,23 @@ impl App {
         self.command_menu_index = 0;
 
         if prompt.trim().is_empty() {
+            return;
+        }
+
+        // P2: 记录输入历史（供 Up/Down 召回）
+        self.add_history(&prompt);
+        self.history_index = None;
+        self.history_draft = None;
+
+        // Shell passthrough: !!command (hidden) or !command (visible) — T1-#3
+        if prompt.starts_with("!!") {
+            let cmd = prompt[2..].trim().to_string();
+            self.run_shell_hidden(&cmd).await;
+            return;
+        }
+        if prompt.starts_with('!') {
+            let cmd = prompt[1..].trim().to_string();
+            self.run_shell_visible(&cmd).await;
             return;
         }
 
@@ -528,7 +800,8 @@ impl App {
         }
 
         if self.is_processing {
-            self.status_msg = "Already processing a request...".to_string();
+            // P2: 处理中再按 Enter → 排队为 steering 消息（而非拒绝）。
+            self.enqueue_message(QKind::Steering, prompt);
             return;
         }
 
@@ -817,14 +1090,72 @@ impl App {
         let session_id = self.session_id.clone();
         let workspace = self.workspace.clone();
         let prompt = prompt.to_string();
+        let thinking_level = self.thinking_level;
 
         tokio::spawn(async move {
-            let result = agent.run(&session_id, &prompt, &workspace).await;
+            let options = ChatOptions {
+                thinking_level: Some(thinking_level),
+            };
+            let result = agent.run_with_options(&session_id, &prompt, &workspace, &options).await;
             if let Err(e) = &result {
                 tracing::error!("Agent error: {}", e);
             }
             let _ = result;
         });
+    }
+
+    /// Execute a shell command and display output in chat (T1-#3).
+    async fn run_shell_visible(&mut self, cmd: &str) {
+        self.add_line(UiElement::User { text: format!("!{}", cmd) });
+        let output = Self::exec_shell(cmd).await;
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let text = if stderr.is_empty() {
+                    stdout.to_string()
+                } else {
+                    format!("{}\n[stderr]\n{}", stdout, stderr)
+                };
+                self.add_line(UiElement::System { text: text.trim_end().to_string() });
+            }
+            Err(e) => self.add_line(UiElement::Error { text: format!("Shell error: {}", e) }),
+        }
+    }
+
+    /// Execute a shell command, inject output into the next agent prompt (T1-#3).
+    async fn run_shell_hidden(&mut self, cmd: &str) {
+        let output = Self::exec_shell(cmd).await;
+        let result = match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(e) => format!("[shell error: {}]", e),
+        };
+        let injected = format!("`!{}` 的输出：\n```\n{}\n```", cmd, result.trim_end());
+        self.add_line(UiElement::User { text: injected.clone() });
+        self.submit_prompt(&injected).await;
+    }
+
+    /// Execute a shell command with 30s timeout and platform-specific shell.
+    async fn exec_shell(cmd: &str) -> Result<std::process::Output, String> {
+        let future = async {
+            #[cfg(windows)]
+            {
+                tokio::process::Command::new("cmd")
+                    .arg("/C").arg(cmd)
+                    .output().await
+                    .map_err(|e| format!("{}", e))
+            }
+            #[cfg(not(windows))]
+            {
+                tokio::process::Command::new("sh")
+                    .arg("-c").arg(cmd)
+                    .output().await
+                    .map_err(|e| format!("{}", e))
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), future)
+            .await
+            .unwrap_or(Err("Command timed out after 30s".to_string()))
     }
 
     async fn handle_command(&mut self, input: &str) {
@@ -871,7 +1202,57 @@ impl App {
             }
             "/help" => {
                 self.add_line(UiElement::System {
-                    text: "Commands:\n  /yolo      ⚡ YOLO mode\n  /agent     🤖 Agent mode\n  /plan      📋 Plan mode\n  /flow      🌊 Flow mode\n  /edits     ✏ Accept-Edits\n  /model     📦 Models (API fetch)\n  /editprovider ⚙ Edit providers\n  /help      Show commands\n  /clear     Clear conversation\n  /new       New session\n  /resume <id> Resume\n  /sessions  List sessions\n  /session <id> Info\n  /findskill 🔍 Find & install skills\n  /mcp list  MCP servers\n  /compact   Compress\n  /exit      Quit".into(),
+                    text: "Commands:\n  /yolo      ⚡ YOLO mode\n  /agent     🤖 Agent mode\n  /plan      📋 Plan mode\n  /flow      🌊 Flow mode\n  /edits     ✏ Accept-Edits\n  /model     📦 Models (API fetch)\n  /editprovider ⚙ Edit providers\n  /name <n>  Rename session\n  /export    Export session to markdown\n  /copy      Copy last response\n  /hotkeys   Show keybindings\n  /fork      ⑂ Fork current session (alias: /clone)\n  /reload    ⟳ Reload settings/skills/keybindings\n  /settings ⚙ Open settings dialog\n  /help      Show commands\n  /clear     Clear conversation\n  /new       New session\n  /resume <id> Resume\n  /sessions  List sessions\n  /session <id> Info\n  /findskill 🔍 Find & install skills\n  /mcp list  MCP servers\n  /compact   Compress\n  /exit      Quit".into(),
+                });
+            }
+            "/name" => {
+                let name = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+                if name.is_empty() {
+                    self.add_line(UiElement::System {
+                        text: format!("Current session name: {}", self.session_title),
+                    });
+                } else {
+                    match self.conversation.update_title(&self.session_id, &name).await {
+                        Ok(_) => {
+                            self.session_title = name.clone();
+                            self.add_line(UiElement::System {
+                                text: format!("Session renamed: {}", name),
+                            });
+                        }
+                        Err(e) => self.add_line(UiElement::Error {
+                            text: format!("Rename failed: {}", e),
+                        }),
+                    }
+                }
+            }
+            "/export" => {
+                let file = parts.get(1).map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("goat-session-{}.md", self.session_id.chars().take(8).collect::<String>()));
+                match self.conversation.get_messages(&self.session_id).await {
+                    Ok(messages) => {
+                        let mut md = String::new();
+                        md.push_str(&format!("# RGoat Session {}\n\n", self.session_id.chars().take(8).collect::<String>()));
+                        for msg in messages {
+                            match msg.role.as_str() {
+                                "user" => md.push_str(&format!("## User\n\n{}\n\n", msg.content)),
+                                "assistant" => md.push_str(&format!("## Assistant\n\n{}\n\n", msg.content)),
+                                _ => md.push_str(&format!("### {}\n\n{}\n\n", msg.role, msg.content)),
+                            }
+                        }
+                        match std::fs::write(&file, md) {
+                            Ok(_) => self.add_line(UiElement::System { text: format!("Exported to {}", file) }),
+                            Err(e) => self.add_line(UiElement::Error { text: format!("Export failed: {}", e) }),
+                        }
+                    }
+                    Err(e) => self.add_line(UiElement::Error { text: format!("Export failed: {}", e) }),
+                }
+            }
+            "/copy" => {
+                self.copy_last_assistant();
+            }
+            "/hotkeys" => {
+                self.add_line(UiElement::System {
+                    text: render_hotkeys(self.keybindings.as_ref()),
                 });
             }
             "/clear" => {
@@ -955,10 +1336,12 @@ impl App {
                 // M10: 实际创建新会话
                 match self.conversation.get_or_create_session("new", Some("New Session"), Some(&self.workspace)).await {
                     Ok(session) => {
-                        self.add_line(UiElement::System {
-                            text: format!("New session created: {} ({})", session.id.chars().take(8).collect::<String>(), session.title),
-                        });
+                        let sid_short: String = session.id.chars().take(8).collect();
                         self.session_id = session.id;
+                        self.session_title = session.title.clone();
+                        self.add_line(UiElement::System {
+                            text: format!("New session created: {} ({})", sid_short, session.title),
+                        });
                         self.status_msg = "New session".to_string();
                     }
                     Err(e) => {
@@ -1074,6 +1457,7 @@ impl App {
                                     }
                                     // 加载成功，提交 session 状态
                                     self.session_id = s.id;
+                                    self.session_title = s.title.clone();
                                     self.status_msg = format!("Resumed session: {}", s.title);
                                     // 注入续传提示
                                     self.add_line(UiElement::System {
@@ -1272,12 +1656,208 @@ impl App {
                     }
                 }
             }
+            "/fork" | "/clone" => {
+                if self.is_processing {
+                    self.add_line(UiElement::Error {
+                        text: "Cannot fork while agent is processing — press Esc to interrupt first.".into(),
+                    });
+                    return;
+                }
+                match self.conversation.fork_session(&self.session_id, None, None).await {
+                    Ok(new_session) => {
+                        let sid_short: String = new_session.id.chars().take(8).collect();
+                        self.add_line(UiElement::System {
+                            text: format!(
+                                " ⑂ Forked to new session: {} ({} messages copied)",
+                                sid_short, new_session.message_count
+                            ),
+                        });
+                        self.session_id = new_session.id;
+                        self.session_title = new_session.title.clone();
+                        self.reload_messages().await;
+                        self.status_msg = format!("Forked → {}", sid_short);
+                    }
+                    Err(e) => self.add_line(UiElement::Error {
+                        text: format!("Fork failed: {}", e),
+                    }),
+                }
+            }
+            "/reload" => {
+                if self.is_processing {
+                    self.add_line(UiElement::Error {
+                        text: "Cannot reload while agent is processing — press Esc to interrupt first.".into(),
+                    });
+                    return;
+                }
+                let mut reloaded: Vec<String> = Vec::new();
+                match rgoat_core::core::config::Settings::load() {
+                    Ok(s) => {
+                        reloaded.push(format!(
+                            "settings(provider={}, model={})",
+                            s.provider,
+                            s.model
+                        ));
+                    }
+                    Err(e) => self.add_line(UiElement::Error {
+                        text: format!("Settings reload failed: {}", e),
+                    }),
+                }
+                self.loaded_skills = load_skills_for_menu(&self.workspace);
+                reloaded.push(format!("skills({})", self.loaded_skills.len()));
+                self.keybindings = load_keybindings();
+                if let Some(kb) = &self.keybindings {
+                    reloaded.push(format!("keybindings({})", kb.len()));
+                } else {
+                    reloaded.push("keybindings(default)".into());
+                }
+                self.add_line(UiElement::System {
+                    text: format!("⟳ Reloaded: {}", reloaded.join(", ")),
+                });
+                self.add_line(UiElement::System {
+                    text: "Note: provider/model/agent-config changes require restart to take full effect.".into(),
+                });
+                self.status_msg = "Reloaded".to_string();
+            }
+            "/settings" => {
+                match rgoat_core::core::config::Settings::load() {
+                    Ok(s) => {
+                        let items = vec![
+                            SettingsItem {
+                                key: "provider".into(),
+                                label: "Default Provider".into(),
+                                value: s.provider.clone(),
+                                kind: ItemKind::Text,
+                            },
+                            SettingsItem {
+                                key: "model".into(),
+                                label: "Default Model".into(),
+                                value: s.model.clone(),
+                                kind: ItemKind::Text,
+                            },
+                            SettingsItem {
+                                key: "max_agent_turns".into(),
+                                label: "Max Agent Turns".into(),
+                                value: s.max_agent_turns.to_string(),
+                                kind: ItemKind::Number { min: 1, max: 500, step: 1 },
+                            },
+                            SettingsItem {
+                                key: "max_concurrency".into(),
+                                label: "Max Concurrency".into(),
+                                value: s.max_concurrency.to_string(),
+                                kind: ItemKind::Number { min: 1, max: 16, step: 1 },
+                            },
+                            SettingsItem {
+                                key: "max_depth".into(),
+                                label: "Max Subagent Depth".into(),
+                                value: s.max_depth.to_string(),
+                                kind: ItemKind::Number { min: 1, max: 10, step: 1 },
+                            },
+                            SettingsItem {
+                                key: "sub_model".into(),
+                                label: "Sub-Agent Model".into(),
+                                value: s.sub_model.clone().unwrap_or_default(),
+                                kind: ItemKind::Text,
+                            },
+                            SettingsItem {
+                                key: "review_model".into(),
+                                label: "Flow Review Model".into(),
+                                value: s.review_model.clone().unwrap_or_default(),
+                                kind: ItemKind::Text,
+                            },
+                        ];
+                        self.settings_dialog = Some(SettingsDialog::new(items));
+                        self.status_msg = "Settings dialog opened".to_string();
+                    }
+                    Err(e) => self.add_line(UiElement::Error {
+                        text: format!("Failed to load settings: {}", e),
+                    }),
+                }
+            }
             _ => {
                 self.add_line(UiElement::System {
                     text: format!("Unknown: {}. Use /help to see available commands.", cmd),
                 });
             }
         }
+    }
+
+    /// Reload all messages of the current session into the chat area.
+    /// Used by `/fork` and `/clone` after switching `session_id`.
+    /// Mirrors the rendering logic of `/resume` (system messages are skipped to
+    /// avoid duplicating the session-start banner).
+    async fn reload_messages(&mut self) {
+        self.lines.clear();
+        self.scroll_from_bottom = 0;
+        self.streaming_idx = None;
+        self.search_matches.clear();
+        self.search_current = 0;
+        let messages = match self.conversation.get_messages(&self.session_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                self.add_line(UiElement::Error {
+                    text: format!("Reload messages failed: {}", e),
+                });
+                return;
+            }
+        };
+        for msg in messages {
+            if msg.content.is_empty() {
+                continue;
+            }
+            match msg.role.as_str() {
+                "user" => self.add_line(UiElement::User { text: msg.content }),
+                "assistant" => self.add_line(UiElement::Assistant { text: msg.content }),
+                "tool" => {
+                    let success = !msg.content.starts_with("[error]");
+                    let summary: String = msg.content.chars().take(100).collect();
+                    let output_line_count = msg.content.lines().count();
+                    self.add_line(UiElement::ToolCall {
+                        name: "tool".into(),
+                        success,
+                        summary,
+                        output: msg.content,
+                        collapsed: true,
+                        elapsed_ms: 0,
+                        output_line_count,
+                    });
+                }
+                "system" => self.add_line(UiElement::System { text: msg.content }),
+                _ => {}
+            }
+        }
+    }
+
+    /// Persist numeric edits from the settings dialog back to `setting.json`.
+    /// Only fields present in `Settings` and edited via the dialog are written;
+    /// string fields are read-only in the dialog and pass through unchanged.
+    fn save_settings_from_dialog(&mut self) -> Result<(), String> {
+        let dialog = self
+            .settings_dialog
+            .as_ref()
+            .ok_or_else(|| "Settings dialog not open".to_string())?;
+        let mut settings =
+            rgoat_core::core::config::Settings::load().map_err(|e| e.to_string())?;
+        for item in &dialog.items {
+            match item.key.as_str() {
+                "max_agent_turns" => {
+                    settings.max_agent_turns =
+                        item.value.parse().unwrap_or(settings.max_agent_turns);
+                }
+                "max_concurrency" => {
+                    settings.max_concurrency =
+                        item.value.parse().unwrap_or(settings.max_concurrency);
+                }
+                "max_depth" => {
+                    settings.max_depth = item.value.parse().unwrap_or(settings.max_depth);
+                }
+                _ => {}
+            }
+        }
+        settings.save().map_err(|e| e.to_string())?;
+        if let Some(d) = self.settings_dialog.as_mut() {
+            d.dirty = false;
+        }
+        Ok(())
     }
 
     fn scroll_down(&mut self, lines: usize) {
@@ -1320,6 +1900,185 @@ impl App {
     fn set_scroll_hint(&mut self, msg: String) {
         self.scroll_hint = msg;
         self.scroll_hint_expiry = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    /// Copy the last assistant message to the system clipboard (T1-#5).
+    fn copy_last_assistant(&mut self) {
+        let last = self.lines.iter().rev().find_map(|l| match l {
+            UiElement::Assistant { text } | UiElement::AssistantStream { text } => Some(text.clone()),
+            _ => None,
+        });
+        match last {
+            Some(text) => {
+                match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                    Ok(_) => self.set_scroll_hint("📋 Copied last response".into()),
+                    Err(_) => self.set_scroll_hint("Clipboard error".into()),
+                }
+            }
+            None => self.set_scroll_hint("No assistant message to copy".into()),
+        }
+    }
+
+    /// Open external editor for the current input (Ctrl+G).
+    /// Uses $VISUAL, $EDITOR, or platform default (notepad on Windows, nano on Unix).
+    fn open_external_editor(&mut self) {
+        let tmp_path = std::env::temp_dir().join(format!(".goat-editor-{}.md", std::process::id()));
+
+        // Write current input to temp file
+        if let Err(e) = std::fs::write(&tmp_path, &self.input) {
+            self.add_line(UiElement::Error { text: format!("Editor write failed: {}", e) });
+            return;
+        }
+
+        // Resolve editor
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| {
+                if cfg!(windows) { "notepad".to_string() } else { "nano".to_string() }
+            });
+
+        // Suspend TUI
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), Show);
+
+        // Run editor synchronously (blocks event loop, but TUI is suspended)
+        let status = std::process::Command::new(&editor)
+            .arg(&tmp_path)
+            .status();
+
+        // Resume TUI
+        let _ = enable_raw_mode();
+        let _ = execute!(io::stdout(), EnterAlternateScreen);
+        let _ = execute!(io::stdout(), Hide);
+
+        match status {
+            Ok(s) if s.success() => {
+                match std::fs::read_to_string(&tmp_path) {
+                    Ok(content) => {
+                        self.input = content;
+                        self.input_cursor = self.input.chars().count();
+                        self.set_scroll_hint("Loaded from external editor".into());
+                    }
+                    Err(e) => self.add_line(UiElement::Error {
+                        text: format!("Read back failed: {}", e),
+                    }),
+                }
+            }
+            _ => {
+                self.add_line(UiElement::Error {
+                    text: "Editor exited abnormally".into(),
+                });
+            }
+        }
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    // ── T1-#4: File picker methods ──
+
+    /// Scan the workspace directory for files (skip .git, target, node_modules, .goat).
+    /// Returns up to 500 files sorted by path.
+    fn scan_project_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = Vec::new();
+        let workspace = &self.workspace;
+        let walker = walkdir::WalkDir::new(workspace)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                // Skip hidden dirs and common build output dirs
+                !(name == ".git" || name == "target" || name == "node_modules"
+                    || name == ".goat" || name == ".rgoat")
+            });
+        for entry in walker {
+            if files.len() >= 500 {
+                break;
+            }
+            if let Ok(e) = entry {
+                if e.file_type().is_file() {
+                    files.push(e.path().to_path_buf());
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// Simple case-insensitive substring match, sorted by match position.
+    fn fuzzy_filter(files: &[PathBuf], query: &str) -> Vec<PathBuf> {
+        let q = query.to_lowercase();
+        let mut scored: Vec<(usize, PathBuf)> = files
+            .iter()
+            .filter_map(|p| {
+                let name = p.to_string_lossy().to_lowercase();
+                name.find(&q).map(|pos| (pos, p.clone()))
+            })
+            .collect();
+        scored.sort_by_key(|(pos, _)| *pos);
+        scored.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Activate the file picker after '@' was typed.
+    fn activate_file_picker(&mut self) {
+        self.file_picker_active = true;
+        self.file_picker_query.clear();
+        self.file_picker_matches = self.scan_project_files();
+        self.file_picker_index = 0;
+    }
+
+    /// Deactivate the file picker.
+    fn deactivate_file_picker(&mut self) {
+        self.file_picker_active = false;
+        self.file_picker_query.clear();
+        self.file_picker_matches.clear();
+        self.file_picker_index = 0;
+    }
+
+    /// Insert a file reference at the cursor position, replacing the '@' trigger and query.
+    fn insert_file_ref(&mut self, path: &PathBuf) {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        // Check for binary files (NUL byte)
+        if content.contains('\0') {
+            self.set_scroll_hint("Binary file — cannot insert".into());
+            self.deactivate_file_picker();
+            return;
+        }
+        // Truncate large files (>10KB)
+        let truncated = content.len() > 10_240;
+        let display = if truncated {
+            let mut c = content;
+            c.truncate(10_240);
+            c.push_str("\n\n[truncated — file exceeds 10KB]");
+            c
+        } else {
+            content
+        };
+        let rel = path.strip_prefix(&self.workspace).unwrap_or(path);
+        let insertion = format!("```{}\n{}\n```", rel.display(), display);
+
+        // Remove the '@' trigger and query from input, then insert the file reference.
+        // file_picker_trigger_pos 是 char index（与 input_cursor 语义一致）。
+        let trigger_char = self.file_picker_trigger_pos;
+        let query_len_chars = 1 + self.file_picker_query.chars().count(); // '@' + query chars
+
+        // char index → byte index 安全转换（避免非 char boundary 切片 panic）
+        let trigger_byte = self.input
+            .char_indices()
+            .nth(trigger_char)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len());
+        let query_byte_end = self.input[trigger_byte..]
+            .chars()
+            .take(query_len_chars)
+            .fold(trigger_byte, |acc, c| acc + c.len_utf8());
+
+        let before: String = self.input[..trigger_byte].to_string();
+        let after: String = self.input[query_byte_end..].to_string();
+        self.input = before + &insertion + "\n" + &after;
+        // cursor 用 char 数（不是 byte 长度），与 input_cursor 全局语义一致
+        self.input_cursor = trigger_char + insertion.chars().count() + 1;
+        self.deactivate_file_picker();
     }
 
     /// Start a search session (TUI-9).
@@ -1439,9 +2198,9 @@ impl App {
         }
     }
 
-    /// Move cursor to the previous line in multi-line input (TUI-2).
-    /// Finds the column position in the current line, then jumps to the
-    /// same column (or end) in the previous line.
+    /// Move cursor to the previous line in multi-line input (TUI-2)。
+    /// 使用 display width 而非 char index 作为列，对齐 pi preferredVisualCol：
+    /// 中文/emoji 行间上下移动保持视觉列；左右移动后重置 sticky。
     fn move_cursor_line_up(&mut self) {
         if self.input_cursor == 0 {
             return;
@@ -1457,24 +2216,38 @@ impl App {
         // If we're already on the first line, go to start
         if line_start == 0 {
             self.input_cursor = 0;
+            self.preferred_visual_col = None;
             return;
         }
 
-        let col = cursor - line_start; // column within current line
+        // 计算当前视觉列（display width，非 char index）
+        let current_line: String = chars[line_start..cursor].iter().collect();
+        let visual_col = UnicodeWidthStr::width(current_line.as_str());
+        // sticky column：若已有 preferred，取较大值（保持上次的最远列）
+        let target_col = self.preferred_visual_col.unwrap_or(visual_col).max(visual_col);
+        self.preferred_visual_col = Some(target_col);
 
-        // Find the end of the previous line
-        let prev_line_end = line_start.saturating_sub(1); // skip the '\n'
+        // Find the end of the previous line (skip the '\n')
+        let prev_line_end = line_start.saturating_sub(1);
         let prev_line_start = chars[..prev_line_end].iter().rposition(|&c| c == '\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let prev_line_len = prev_line_end - prev_line_start;
+        let prev_line: String = chars[prev_line_start..=prev_line_end].iter().collect();
 
-        // Place cursor at same column, or end of previous line
-        let new_col = col.min(prev_line_len);
-        self.input_cursor = prev_line_start + new_col;
+        // 在上一行按 grapheme 累加宽度，找到 target_col 落点
+        let mut acc_col = 0usize;
+        let mut acc_chars = 0usize;
+        for grapheme in prev_line.graphemes(true) {
+            let gw = UnicodeWidthStr::width(grapheme);
+            if acc_col + gw > target_col { break; }
+            acc_col += gw;
+            acc_chars += grapheme.chars().count();
+        }
+        self.input_cursor = prev_line_start + acc_chars;
     }
 
-    /// Move cursor to the next line in multi-line input (TUI-2).
+    /// Move cursor to the next line in multi-line input (TUI-2)。
+    /// 使用 display width 而非 char index 作为列，对齐 pi preferredVisualCol。
     fn move_cursor_line_down(&mut self) {
         let chars: Vec<char> = self.input.chars().collect();
         let cursor = self.input_cursor.min(chars.len());
@@ -1488,7 +2261,12 @@ impl App {
         let line_start = chars[..cursor].iter().rposition(|&c| c == '\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let col = cursor - line_start;
+
+        // 计算当前视觉列
+        let current_line: String = chars[line_start..cursor].iter().collect();
+        let visual_col = UnicodeWidthStr::width(current_line.as_str());
+        let target_col = self.preferred_visual_col.unwrap_or(visual_col).max(visual_col);
+        self.preferred_visual_col = Some(target_col);
 
         // Next line starts right after the '\n'
         let next_line_start = next_nl + 1;
@@ -1496,10 +2274,18 @@ impl App {
         let next_line_end = chars[next_line_start..].iter().position(|&c| c == '\n')
             .map(|p| next_line_start + p)
             .unwrap_or(chars.len());
-        let next_line_len = next_line_end - next_line_start;
+        let next_line: String = chars[next_line_start..next_line_end].iter().collect();
 
-        let new_col = col.min(next_line_len);
-        self.input_cursor = next_line_start + new_col;
+        // 在下一行按 grapheme 累加宽度，找到 target_col 落点
+        let mut acc_col = 0usize;
+        let mut acc_chars = 0usize;
+        for grapheme in next_line.graphemes(true) {
+            let gw = UnicodeWidthStr::width(grapheme);
+            if acc_col + gw > target_col { break; }
+            acc_col += gw;
+            acc_chars += grapheme.chars().count();
+        }
+        self.input_cursor = next_line_start + acc_chars;
     }
 
     /// Return the list of available slash commands, followed by loaded skills.
@@ -1522,6 +2308,10 @@ impl App {
             ("/session".into(),  "session".into(),  "Show session info by ID".into()),
             ("/mcp".into(),      "mcp".into(),      "MCP server management".into()),
             ("/compact".into(),  "compact".into(),  "Compress conversation context".into()),
+            ("/fork".into(),     "fork".into(),     "⑂ Fork current session (alias /clone)".into()),
+            ("/clone".into(),    "clone".into(),    "⑂ Alias for /fork".into()),
+            ("/reload".into(),   "reload".into(),   "⟳ Reload settings/skills/keybindings".into()),
+            ("/settings".into(), "settings".into(), "⚙ Open settings dialog".into()),
             ("/exit".into(),     "exit".into(),     "Exit the TUI".into()),
         ];
 
@@ -1689,6 +2479,18 @@ impl App {
                 // D4: finalise sidebar step count.
                 self.sidebar_total_steps = *steps;
                 self.status_msg = format!("Done in {} steps.", steps);
+                // P2: 交付排队消息（steering 优先，其次 follow-up）。
+                // is_processing 已置 false，submit_prompt 可重新触发 agent。
+                if let Some(msg) = dequeue_next_from(&mut self.message_queue) {
+                    let label = match msg.kind {
+                        QKind::Steering => "steering",
+                        QKind::FollowUp => "follow-up",
+                    };
+                    self.add_line(UiElement::System {
+                        text: format!("📨 Delivering queued {} message…", label),
+                    });
+                    self.pending_submit = Some(msg.text);
+                }
             }
             AgentEvent::Error { message } => {
                 self.add_line(UiElement::Error { text: message.clone() });
@@ -1903,6 +2705,13 @@ async fn run_event_loop(
             }
         }
 
+        // P2: 交付排队消息（由 Finished 事件设置 pending_submit）。
+        // 放在事件排空之后、绘制之前，确保新提交在本次绘制中可见。
+        if let Some(prompt) = app.pending_submit.take() {
+            app.add_line(UiElement::User { text: prompt.clone() });
+            app.submit_prompt(&prompt).await;
+        }
+
         // ── Cursor visibility follows processing state ──
         if app.is_processing {
             let _ = execute!(terminal.backend_mut(), Hide);
@@ -1918,48 +2727,34 @@ async fn run_event_loop(
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Paste(text) => {
-                    // Bracketed paste: sanitize and flatten the pasted text.
-                    // Some Windows terminals split multi-line pastes into lines
-                    // followed by Enter keys; normalizing all line breaks to spaces
-                    // prevents accidental auto-submit of the first segment.
-                    // Also drop NUL bytes which can truncate C-level clipboard APIs.
-                    let mut text: String = text
+                    // Bracketed paste: 保留换行（多行输入支持），仅清理 NUL 字节并归一化 CRLF。
+                    // 80ms paste-burst guard 已移除 — bracketed paste 是精确区分粘贴/手输的机制，
+                    // 不再需要启发式判断。
+                    let cleaned: String = text
                         .chars()
                         .filter(|c| *c != '\0')
-                        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
                         .collect::<String>()
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if text.is_empty() {
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n");
+                    if cleaned.is_empty() {
                         continue;
                     }
                     // Input length guard — prevent OOM / O(n²) performance collapse
                     let char_count = app.input.chars().count();
                     const INPUT_MAX: usize = 10_000;
-                    if char_count + text.chars().count() > INPUT_MAX {
+                    let paste_chars = cleaned.chars().count();
+                    if char_count + paste_chars > INPUT_MAX {
                         let available = INPUT_MAX.saturating_sub(char_count);
                         if available == 0 {
                             app.status_msg = "Input full (10,000 chars limit)".to_string();
                             continue;
                         }
-                        text = text.chars().take(available).collect();
+                        let truncated: String = cleaned.chars().take(available).collect();
                         app.status_msg = format!("Paste truncated to fit 10k char limit ({} remaining)", available);
+                        app.handle_paste(&truncated);
+                        continue;
                     }
-                    if app.input_cursor > char_count {
-                        app.input_cursor = char_count;
-                    }
-                    // If the input already has text, append a space before the paste.
-                    let byte_pos = app.input.char_indices().nth(app.input_cursor).map(|(i, _)| i).unwrap_or(app.input.len());
-                    if byte_pos > 0 && !app.input.ends_with(' ') && !text.starts_with(' ') {
-                        app.input.insert(byte_pos, ' ');
-                        app.input_cursor += 1;
-                    }
-                    let byte_pos = app.input.char_indices().nth(app.input_cursor).map(|(i, _)| i).unwrap_or(app.input.len());
-                    app.input.insert_str(byte_pos, &text);
-                    app.input_cursor += text.chars().count();
-                    app.show_command_menu = app.input.starts_with('/');
-                    app.last_input_time = Some(Instant::now());
+                    app.handle_paste(&cleaned);
                 }
                 Event::Mouse(mouse) => {
                     const SCROLL_LINES: usize = 3;
@@ -1989,6 +2784,74 @@ async fn run_event_loop(
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Release {
                         continue;
+                    }
+
+                    // ── Settings dialog key handling (T3-#15) ──
+                    // Placed BEFORE global Ctrl+C so Ctrl+C inside the dialog
+                    // discards & closes instead of triggering exit logic.
+                    if app.settings_dialog.is_some() {
+                        let ctrl_s = key.code == KeyCode::Char('s')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                        let ctrl_c = key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                        if ctrl_s {
+                            match app.save_settings_from_dialog() {
+                                Ok(()) => {
+                                    app.add_line(UiElement::System {
+                                        text: "💾 Settings saved to ~/.goat/setting.json — /reload or restart to apply.".into(),
+                                    });
+                                    app.settings_dialog = None;
+                                    app.status_msg = "Settings saved".to_string();
+                                }
+                                Err(e) => {
+                                    app.add_line(UiElement::Error {
+                                        text: format!("Save failed: {}", e),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        if ctrl_c {
+                            // Ctrl+C inside settings dialog: discard & close
+                            app.settings_dialog = None;
+                            app.status_msg = "Settings dialog closed (discarded)".to_string();
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Up => {
+                                if let Some(d) = app.settings_dialog.as_mut() {
+                                    d.move_up();
+                                }
+                                continue;
+                            }
+                            KeyCode::Down => {
+                                if let Some(d) = app.settings_dialog.as_mut() {
+                                    d.move_down();
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('+') | KeyCode::Char('=') => {
+                                if let Some(d) = app.settings_dialog.as_mut() {
+                                    d.inc();
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('-') | KeyCode::Char('_') => {
+                                if let Some(d) = app.settings_dialog.as_mut() {
+                                    d.dec();
+                                }
+                                continue;
+                            }
+                            KeyCode::Esc => {
+                                app.settings_dialog = None;
+                                app.status_msg = "Settings dialog closed".to_string();
+                                continue;
+                            }
+                            _ => {
+                                // Consume all other keys while dialog is open
+                                continue;
+                            }
+                        }
                     }
 
                     // ── Ctrl+C double-tap (global) ──
@@ -2094,6 +2957,52 @@ async fn run_event_loop(
                         continue;
                     }
 
+                    // ── T1-#4: File picker key handling ──
+                    if app.file_picker_active {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.deactivate_file_picker();
+                            }
+                            KeyCode::Enter => {
+                                if !app.file_picker_matches.is_empty() {
+                                    let idx = app.file_picker_index.min(app.file_picker_matches.len() - 1);
+                                    let path = app.file_picker_matches[idx].clone();
+                                    app.insert_file_ref(&path);
+                                } else {
+                                    app.deactivate_file_picker();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if app.file_picker_index > 0 {
+                                    app.file_picker_index -= 1;
+                                }
+                            }
+                            KeyCode::Down => {
+                                let max = app.file_picker_matches.len().saturating_sub(1);
+                                if app.file_picker_index < max {
+                                    app.file_picker_index += 1;
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                app.file_picker_query.pop();
+                                if app.file_picker_query.is_empty() {
+                                    app.deactivate_file_picker();
+                                } else {
+                                    app.file_picker_matches = App::fuzzy_filter(&app.scan_project_files(), &app.file_picker_query);
+                                    app.file_picker_index = 0;
+                                }
+                            }
+                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.file_picker_query.push(c);
+                                let all_files = app.scan_project_files();
+                                app.file_picker_matches = App::fuzzy_filter(&all_files, &app.file_picker_query);
+                                app.file_picker_index = 0;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // ── Normal key handling ──
                     // Chat focus: navigation keys go to conversation, Esc returns to Input
                     if app.focus == FocusTarget::Chat {
@@ -2174,20 +3083,45 @@ async fn run_event_loop(
                     }
 
                     match (key.code, key.modifiers) {
-                        // Esc: close menu if open, otherwise exit
+                        // Esc: close menu / interrupt agent / restore queue / exit
                         (KeyCode::Esc, _) => {
                             if app.show_command_menu {
                                 app.show_command_menu = false;
-                            } else if app.input.is_empty() {
+                            } else if app.is_processing {
+                                // P2: 中断 agent；若有排队消息则恢复到 input。
+                                app.cancel_token.cancel();
+                                app.is_processing = false;
+                                app.processing_start = None;
+                                app.streaming_idx = None;
+                                if !app.message_queue.is_empty() {
+                                    app.restore_queue_to_input();
+                                }
+                                app.add_line(UiElement::System {
+                                    text: "⏸ Interrupted — agent cancelled.".into(),
+                                });
+                                app.status_msg = "Interrupted.".to_string();
+                            } else if app.input.is_empty() && app.message_queue.is_empty() {
                                 return Ok(());
-                            } else {
+                            } else if !app.input.is_empty() {
                                 app.input.clear();
                                 app.input_cursor = 0;  // P0 fix: reset cursor on clear
                                 app.show_command_menu = false;
+                                // P2: 退出 history 浏览状态（对齐 pi Esc 行为）
+                                app.history_index = None;
+                                app.history_draft = None;
+                                app.last_action_is_word_char = false;
+                            } else {
+                                // input 空但队列非空：恢复队列到 input
+                                app.restore_queue_to_input();
                             }
                         }
     
-                        // Tab: auto-complete command from menu, or cycle mode when menu is closed
+                        // Shift+Tab: cycle thinking level (must be before Tab)
+                        (KeyCode::Tab, m) if m.contains(KeyModifiers::SHIFT) => {
+                            app.cycle_thinking();
+                        }
+
+                        // Tab: auto-complete command from menu, path completion, or cycle mode
                         (KeyCode::Tab, _) => {
                             if app.show_command_menu && app.input.starts_with('/') {
                                 let input_lower = app.input.to_lowercase();
@@ -2201,13 +3135,86 @@ async fn run_event_loop(
                                     app.input_cursor = app.input.chars().count();
                                     app.show_command_menu = false;
                                 }
+                            } else if !app.input.starts_with('/') {
+                                // Try path completion
+                                if let Some(prefix) = extract_path_prefix(&app.input, app.input_cursor) {
+                                    // Only trigger path completion if prefix looks like a path
+                                    let looks_like_path = prefix.contains('/')
+                                        || prefix.contains('.')
+                                        || prefix.contains('\\');
+                                    if looks_like_path {
+                                        if let Some(matches) = complete_path(&prefix) {
+                                            if matches.len() == 1 {
+                                                // Unique match: replace prefix in input
+                                                let full = &matches[0];
+                                                let before_prefix: String = app.input.chars().take(app.input_cursor.saturating_sub(prefix.chars().count())).collect();
+                                                let after_cursor: String = app.input.chars().skip(app.input_cursor).collect();
+                                                app.input = format!("{}{}{}", before_prefix, full, after_cursor);
+                                                app.input_cursor = before_prefix.chars().count() + full.chars().count();
+                                            } else {
+                                                // Multiple matches: show completions
+                                                let display: Vec<String> = matches.iter().take(20).cloned().collect();
+                                                let suffix = if matches.len() > 20 { " …" } else { "" };
+                                                app.add_line(UiElement::System {
+                                                    text: format!("Completions: {}{}", display.join("  "), suffix),
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        app.cycle_mode();
+                                    }
+                                } else {
+                                    app.cycle_mode();
+                                }
                             } else {
                                 app.cycle_mode();
                             }
                         }
     
+                        // Shift+Enter: 插入换行（多行输入）。
+                        // crossterm 在 Kitty 协议终端能识别 SHIFT 修饰符；其他终端走 \+Enter fallback。
+                        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => {
+                            app.insert_newline_at_cursor();
+                        }
+
+                        // 某些终端的 Shift+Enter 发送单字符 LF（\n），crossterm 解析为 Char('\n')。
+                        (KeyCode::Char('\n'), _) => {
+                            app.insert_newline_at_cursor();
+                        }
+
+                        // Alt+Enter: 排队为 follow-up 消息（任何时候都排队）
+                        (KeyCode::Enter, m) if m.contains(KeyModifiers::ALT) => {
+                            let prompt = std::mem::take(&mut app.input);
+                            app.input_cursor = 0;
+                            app.show_command_menu = false;
+                            app.command_menu_index = 0;
+                            if prompt.trim().is_empty() {
+                                // 空输入不排队，放回 input
+                                app.input = prompt;
+                            } else {
+                                app.enqueue_message(QKind::FollowUp, prompt);
+                            }
+                        }
+
                         // Submit
                         (KeyCode::Enter, _) => {
+                            // \+Enter workaround（终端不支持 Shift+Enter 时的标准 fallback，对齐 pi editor.ts:807）：
+                            // cursor 前一字符是 `\` 时，删除 `\` 并插入换行，而非提交。
+                            {
+                                let chars: Vec<char> = app.input.chars().collect();
+                                let cursor = app.input_cursor.min(chars.len());
+                                if cursor > 0 && chars[cursor - 1] == '\\' {
+                                    let byte_pos = app.input
+                                        .char_indices()
+                                        .nth(cursor - 1)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(app.input.len());
+                                    app.input.remove(byte_pos);  // 删 `\`
+                                    app.input_cursor -= 1;
+                                    app.insert_newline_at_cursor();
+                                    continue;
+                                }
+                            }
                             // If command menu is open and there's a selection, fill the command
                             if app.show_command_menu && app.input.starts_with('/') {
                                 let input_lower = app.input.to_lowercase();
@@ -2226,19 +3233,6 @@ async fn run_event_loop(
                                 }
                             }
                             app.show_command_menu = false;
-                            // Paste-burst guard: if Enter arrives within 80 ms of
-                            // the last input event (Paste / Char / Backspace), the
-                            // terminal is likely splitting a multi-line paste into
-                            // per-line events.  Absorb the Enter as a space instead
-                            // of submitting a truncated prompt.
-                            if let Some(t) = app.last_input_time {
-                                if t.elapsed() < Duration::from_millis(80) {
-                                    app.input.push(' ');
-                                    app.input_cursor = app.input.chars().count();
-                                    app.last_input_time = Some(Instant::now());
-                                    continue;
-                                }
-                            }
                             if app.input.trim().is_empty() {
                                 // No input — toggle collapse of the last ToolCall or Thought
                                 if let Some(collapsed) = app.lines.iter_mut().rev().find_map(|l| {
@@ -2260,10 +3254,38 @@ async fn run_event_loop(
                             app.submit().await;
                         }
     
+                        // Alt+Backspace: delete previous word (Emacs, 对齐 pi deleteWordBackwards)
+                        // 与 Ctrl+W 行为一致，压 kill ring + push_undo
+                        (KeyCode::Backspace, m) if m.contains(KeyModifiers::ALT) => {
+                            let cursor = app.input_cursor.min(app.input.chars().count());
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let mut i = cursor;
+                            while i > 0 && chars[i - 1].is_whitespace() { i -= 1; }
+                            while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '-') {
+                                i -= 1;
+                            }
+                            if i < cursor {
+                                app.push_undo();
+                                app.last_action_is_word_char = false;
+                                let pre_byte: usize = app.input.chars().take(i).collect::<String>().len();
+                                let del_byte: usize = app.input.chars().take(cursor).collect::<String>().len();
+                                let deleted: String = app.input[pre_byte..del_byte].to_string();
+                                app.push_kill_ring(deleted);
+                                let post: String = app.input.chars().skip(cursor).collect();
+                                app.input.truncate(pre_byte);
+                                app.input.push_str(&post);
+                                app.input_cursor = i;
+                                app.show_command_menu = app.input.starts_with('/');
+                                app.preferred_visual_col = None;
+                            }
+                        }
+
                         // Backspace
                         (KeyCode::Backspace, _) => {
                             let char_count = app.input.chars().count();
                             if !app.input.is_empty() && app.input_cursor > 0 && app.input_cursor <= char_count {
+                                app.push_undo();
+                                app.last_action_is_word_char = false;
                                 let char_indices: Vec<(usize, char)> = app.input.char_indices().collect();
                                 let (byte_pos, _) = char_indices[app.input_cursor - 1];
                                 app.input.remove(byte_pos);
@@ -2274,13 +3296,14 @@ async fn run_event_loop(
                             }
                             // Update command menu visibility: show if input starts with /
                             app.show_command_menu = app.input.starts_with('/');
-                            app.last_input_time = Some(Instant::now());
                         }
 
                         // Delete (forward delete)
                         (KeyCode::Delete, _) => {
                             let char_count = app.input.chars().count();
                             if !app.input.is_empty() && app.input_cursor < char_count {
+                                app.push_undo();
+                                app.last_action_is_word_char = false;
                                 let char_indices: Vec<(usize, char)> = app.input.char_indices().collect();
                                 let (byte_pos, _) = char_indices[app.input_cursor];
                                 app.input.remove(byte_pos);
@@ -2289,19 +3312,103 @@ async fn run_event_loop(
                                 app.input_cursor = char_count;
                             }
                             app.show_command_menu = app.input.starts_with('/');
-                            app.last_input_time = Some(Instant::now());
                         }
 
                         // ── Ctrl+letter handlers (BEFORE general Char to avoid inserting text) ──
                         (KeyCode::Char(c), m) if m.contains(KeyModifiers::CONTROL) => {
                             match c {
-                                // Ctrl+U: clear entire input line (matches CodeWhale / readline)
-                                'u' => {
-                                    app.input.clear();
-                                    app.input_cursor = 0;
-                                    app.show_command_menu = false;
+                                // Ctrl+Z: undo（对齐 pi editor.ts undo）
+                                'z' => {
+                                    if let Some((prev_input, prev_cursor)) = app.undo_stack.pop() {
+                                        app.input = prev_input;
+                                        app.input_cursor = prev_cursor;
+                                        app.show_command_menu = app.input.starts_with('/');
+                                        app.preferred_visual_col = None;
+                                        app.last_action_is_word_char = false;
+                                    }
                                 }
-                                // Ctrl+W: delete previous word
+                                // Ctrl+U: readline 语义 — 删除当前行 cursor 前的内容（多行时只删当前行）。
+                                // 删除内容压入 kill ring（对齐 pi editor.ts deleteToLineStart）。
+                                'u' => {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    let cursor = app.input_cursor.min(chars.len());
+                                    let line_start = chars[..cursor].iter().rposition(|&c| c == '\n')
+                                        .map(|p| p + 1).unwrap_or(0);
+                                    if cursor > line_start {
+                                        app.push_undo();
+                                        app.last_action_is_word_char = false;
+                                        let pre_byte: usize = app.input.chars().take(line_start).collect::<String>().len();
+                                        let del_byte: usize = app.input.chars().take(cursor).collect::<String>().len();
+                                        let deleted: String = app.input[pre_byte..del_byte].to_string();
+                                        app.push_kill_ring(deleted);
+                                        let after: String = app.input.chars().skip(cursor).collect();
+                                        app.input.truncate(pre_byte);
+                                        app.input.push_str(&after);
+                                        app.input_cursor = line_start;
+                                    }
+                                    app.show_command_menu = app.input.starts_with('/');
+                                    app.preferred_visual_col = None;
+                                }
+                                // Ctrl+K: kill to line end（对齐 pi editor.ts deleteToLineEnd）。
+                                // 删除 cursor 到当前行尾的内容，压入 kill ring。
+                                'k' => {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    let cursor = app.input_cursor.min(chars.len());
+                                    let line_end = chars[cursor..].iter().position(|&c| c == '\n')
+                                        .map(|p| cursor + p).unwrap_or(chars.len());
+                                    if line_end > cursor {
+                                        app.push_undo();
+                                        app.last_action_is_word_char = false;
+                                        let pre_byte: usize = app.input.chars().take(cursor).collect::<String>().len();
+                                        let end_byte: usize = app.input.chars().take(line_end).collect::<String>().len();
+                                        let deleted: String = app.input[pre_byte..end_byte].to_string();
+                                        app.push_kill_ring(deleted);
+                                        let after: String = app.input.chars().skip(line_end).collect();
+                                        app.input.truncate(pre_byte);
+                                        app.input.push_str(&after);
+                                        app.show_command_menu = app.input.starts_with('/');
+                                        app.preferred_visual_col = None;
+                                    }
+                                }
+                                // Ctrl+Y: yank（从 kill ring 取最新项，对齐 pi editor.ts yank）。
+                                'y' => {
+                                    if let Some(text) = app.kill_ring.first().cloned() {
+                                        let char_count = app.input.chars().count();
+                                        if app.input_cursor > char_count {
+                                            app.input_cursor = char_count;
+                                        }
+                                        app.push_undo();
+                                        app.last_action_is_word_char = false;
+                                        let byte_pos = app.input.char_indices().nth(app.input_cursor)
+                                            .map(|(i, _)| i).unwrap_or(app.input.len());
+                                        let start_char = app.input_cursor;
+                                        app.input.insert_str(byte_pos, &text);
+                                        app.input_cursor += text.chars().count();
+                                        let end_char = app.input_cursor;
+                                        app.last_yank = Some((start_char, end_char));
+                                        app.show_command_menu = app.input.starts_with('/');
+                                        app.preferred_visual_col = None;
+                                    }
+                                }
+                                // Ctrl+A: 当前行行首（readline 语义，对齐 pi editor.ts cursorLineStart）。
+                                'a' => {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    let cursor = app.input_cursor.min(chars.len());
+                                    let line_start = chars[..cursor].iter().rposition(|&c| c == '\n')
+                                        .map(|p| p + 1).unwrap_or(0);
+                                    app.input_cursor = line_start;
+                                    app.preferred_visual_col = None;
+                                }
+                                // Ctrl+E: 当前行行尾（readline 语义，对齐 pi editor.ts cursorLineEnd）。
+                                'e' => {
+                                    let chars: Vec<char> = app.input.chars().collect();
+                                    let cursor = app.input_cursor.min(chars.len());
+                                    let line_end = chars[cursor..].iter().position(|&c| c == '\n')
+                                        .map(|p| cursor + p).unwrap_or(chars.len());
+                                    app.input_cursor = line_end;
+                                    app.preferred_visual_col = None;
+                                }
+                                // Ctrl+W: delete previous word（对齐 pi deleteWordBackwards，压 kill ring）。
                                 'w' => {
                                     let cursor = app.input_cursor.min(app.input.chars().count());
                                     let prefix: String = app.input.chars().take(cursor).collect();
@@ -2311,17 +3418,78 @@ async fn run_event_loop(
                                             .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
                                             .map(|p| p + 1)
                                             .unwrap_or(0);
-                                        let _delete_count = cursor - word_start;
-                                        // Remove the word from the real input
-                                        let pre_byte: usize = app.input.chars().take(word_start).collect::<String>().len();
-                                        let post: String = app.input.chars().skip(cursor).collect();
-                                        app.input.truncate(pre_byte);
-                                        app.input.push_str(&post);
-                                        app.input_cursor = word_start;
+                                        if word_start < cursor {
+                                            app.push_undo();
+                                            app.last_action_is_word_char = false;
+                                            let pre_byte: usize = app.input.chars().take(word_start).collect::<String>().len();
+                                            let del_byte: usize = app.input.chars().take(cursor).collect::<String>().len();
+                                            let deleted: String = app.input[pre_byte..del_byte].to_string();
+                                            app.push_kill_ring(deleted);
+                                            let post: String = app.input.chars().skip(cursor).collect();
+                                            app.input.truncate(pre_byte);
+                                            app.input.push_str(&post);
+                                            app.input_cursor = word_start;
+                                        }
                                     }
                                     app.show_command_menu = app.input.starts_with('/');
+                                    app.preferred_visual_col = None;
+                                }
+                                // Ctrl+X: copy last assistant response (T1-#5)
+                                'x' => {
+                                    app.copy_last_assistant();
+                                }
+                                // Ctrl+G: open external editor
+                                'g' => {
+                                    app.open_external_editor();
                                 }
                                 _ => {}
+                            }
+                        }
+
+                        // Alt+Y: yank-pop（替换上次 yank 的内容为 kill ring 下一个，对齐 pi yankPop）
+                        // 必须在通用 Char 分支之前，否则会被 (KeyCode::Char(c), _) 吞掉。
+                        (KeyCode::Char('y'), m) if m.contains(KeyModifiers::ALT) => {
+                            if app.kill_ring.len() >= 2 {
+                                if let Some((start_char, end_char)) = app.last_yank {
+                                    // 轮转 kill ring：把第一个移到末尾，取新的第一个
+                                    let first = app.kill_ring.remove(0);
+                                    app.kill_ring.push(first);
+                                    let text = app.kill_ring[0].clone();
+                                    let pre_byte: usize = app.input.chars().take(start_char).collect::<String>().len();
+                                    let after: String = app.input.chars().skip(end_char).collect();
+                                    app.input.truncate(pre_byte);
+                                    app.input.push_str(&text);
+                                    app.input.push_str(&after);
+                                    let new_end = start_char + text.chars().count();
+                                    app.input_cursor = new_end;
+                                    app.last_yank = Some((start_char, new_end));
+                                    app.show_command_menu = app.input.starts_with('/');
+                                    app.preferred_visual_col = None;
+                                    app.last_action_is_word_char = false;
+                                }
+                            }
+                        }
+                        // Alt+D: delete word forward (Emacs, 对齐 pi deleteWordForward)
+                        (KeyCode::Char('d'), m) if m.contains(KeyModifiers::ALT) => {
+                            let cursor = app.input_cursor.min(app.input.chars().count());
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let mut i = cursor;
+                            while i < chars.len() && chars[i].is_whitespace() { i += 1; }
+                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
+                                i += 1;
+                            }
+                            if i > cursor {
+                                app.push_undo();
+                                app.last_action_is_word_char = false;
+                                let pre_byte: usize = app.input.chars().take(cursor).collect::<String>().len();
+                                let del_byte: usize = app.input.chars().take(i).collect::<String>().len();
+                                let deleted: String = app.input[pre_byte..del_byte].to_string();
+                                app.push_kill_ring(deleted);
+                                let post: String = app.input.chars().skip(i).collect();
+                                app.input.truncate(pre_byte);
+                                app.input.push_str(&post);
+                                app.show_command_menu = app.input.starts_with('/');
+                                app.preferred_visual_col = None;
                             }
                         }
 
@@ -2338,43 +3506,102 @@ async fn run_event_loop(
                                 app.status_msg = "Input limit reached (10,000 chars)".to_string();
                                 continue;
                             }
+                            // Undo coalescing: 连续 word char（非空白）合并为一个 undo 单元。
+                            // 对齐 pi editor.ts UndoStack 的 coalescing 策略。
+                            let is_word_char = !c.is_whitespace();
+                            if !is_word_char || !app.last_action_is_word_char {
+                                app.push_undo();
+                            }
+                            app.last_action_is_word_char = is_word_char;
                             let byte_pos = app.input.char_indices().nth(app.input_cursor).map(|(i, _)| i).unwrap_or(app.input.len());
                             app.input.insert(byte_pos, c);
                             app.input_cursor += 1;
                             app.show_command_menu = app.input.starts_with('/');
-                            app.last_input_time = Some(Instant::now());
+
+                            // T1-#4: trigger file picker on '@' (when picker is not already active)
+                            if c == '@' && !app.file_picker_active {
+                                // input_cursor 已前进到 @ 之后，@ 的 char index = cursor - 1
+                                app.file_picker_trigger_pos = app.input_cursor.saturating_sub(1);
+                                app.activate_file_picker();
+                            }
                         }
     
+                        // Ctrl+Left: 向前跳一词（跳过空白，再跳过连续 word char）
+                        (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let mut i = app.input_cursor.min(chars.len());
+                            // 跳过空白
+                            while i > 0 && chars[i - 1].is_whitespace() { i -= 1; }
+                            // 跳过连续 word char（alphanumeric + _ + -）
+                            while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '-') {
+                                i -= 1;
+                            }
+                            app.input_cursor = i;
+                            app.preferred_visual_col = None;
+                        }
+                        // Ctrl+Right: 向后跳一词（跳过连续 word char，再跳过空白）
+                        (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let mut i = app.input_cursor.min(chars.len());
+                            // 跳过连续 word char
+                            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
+                                i += 1;
+                            }
+                            // 跳过空白
+                            while i < chars.len() && chars[i].is_whitespace() { i += 1; }
+                            app.input_cursor = i;
+                            app.preferred_visual_col = None;
+                        }
                         // Cursor movement inside input
                         (KeyCode::Left, _) => {
                             if app.input_cursor > 0 {
                                 app.input_cursor -= 1;
                             }
+                            app.preferred_visual_col = None;
                         }
                         (KeyCode::Right, _) => {
                             let char_count = app.input.chars().count();
                             if app.input_cursor < char_count {
                                 app.input_cursor += 1;
                             }
+                            app.preferred_visual_col = None;
                         }
                         (KeyCode::Home, _) => {
-                            app.input_cursor = 0;
+                            // 当前行行首（对齐 pi cursorLineStart）
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let cursor = app.input_cursor.min(chars.len());
+                            let line_start = chars[..cursor].iter().rposition(|&c| c == '\n')
+                                .map(|p| p + 1).unwrap_or(0);
+                            app.input_cursor = line_start;
+                            app.preferred_visual_col = None;
                         }
                         (KeyCode::End, _) => {
-                            app.input_cursor = app.input.chars().count();
+                            // 当前行行尾（对齐 pi cursorLineEnd）
+                            let chars: Vec<char> = app.input.chars().collect();
+                            let cursor = app.input_cursor.min(chars.len());
+                            let line_end = chars[cursor..].iter().position(|&c| c == '\n')
+                                .map(|p| cursor + p).unwrap_or(chars.len());
+                            app.input_cursor = line_end;
+                            app.preferred_visual_col = None;
                         }
-    
-                        // Command menu navigation (Up/Down) or scroll when no menu
+
+                        // Alt+Up: 取回最后一条排队消息到 input
+                        (KeyCode::Up, m) if m.contains(KeyModifiers::ALT) => {
+                            app.pop_queue_to_input();
+                        }
+
+                        // Up: 命令菜单导航 / 多行跨行 / 单行历史导航（对齐 pi editor.ts:821）
                         (KeyCode::Up, _) => {
                             if app.show_command_menu {
                                 if app.command_menu_index > 0 {
                                     app.command_menu_index -= 1;
                                 }
                             } else if app.input.contains('\n') {
-                                // Multi-line input: move cursor to previous line (TUI-2)
+                                // Multi-line input: move cursor to previous line
                                 app.move_cursor_line_up();
                             } else {
-                                app.scroll_up(1);
+                                // 单行：历史导航（替代原 scroll_up(1)）
+                                app.navigate_history(-1);
                             }
                         }
                         (KeyCode::Down, _) => {
@@ -2388,10 +3615,11 @@ async fn run_event_loop(
                                     app.command_menu_index += 1;
                                 }
                             } else if app.input.contains('\n') {
-                                // Multi-line input: move cursor to next line (TUI-2)
+                                // Multi-line input: move cursor to next line
                                 app.move_cursor_line_down();
                             } else {
-                                app.scroll_down(1);
+                                // 单行：历史导航（替代原 scroll_down(1)）
+                                app.navigate_history(1);
                             }
                         }
                         // PgUp / PgDn — page scrolling (CodeWhale-style)
@@ -2426,28 +3654,42 @@ fn ui(f: &mut Frame, app: &mut App) {
         0
     };
 
+    // T1-#4: file picker height (visible when '@' picks files)
+    let file_picker_height: u16 = if app.file_picker_active {
+        let match_count = app.file_picker_matches.len() as u16;
+        // border(2) + query line(1) + visible items(max 10)
+        let content_height = match_count.min(10) + 3;
+        content_height.min(15)
+    } else {
+        0
+    };
+
     // Compute dynamic input height using CodeWhale's composer_height formula.
     // This is the single source of truth for how many rows the input panel
     // needs, matching the wrap logic used for rendering and cursor.
+    // 宽度必须与 layout_input_with_scroll 一致（input_inner_width = area.width - 4 border），
+    // 否则行数估算与实际 wrap 行数漂移，导致 input 区高度与内容不匹配。
     const MAX_INPUT_ROWS: usize = 10;
     const MIN_INPUT_ROWS: usize = 3;
     let input_prompt = format!("{} ▶ ", app.mode_display());
     let full_input = format!("{}{}", input_prompt, app.input);
+    let input_inner_width_u16 = area.width.saturating_sub(4);
     let input_rows = composer_height(
         &full_input,
-        area.width,
+        input_inner_width_u16,
         MAX_INPUT_ROWS as u16 + 2,
         MIN_INPUT_ROWS,
         MAX_INPUT_ROWS,
     ) as u16;
 
-    // Split: title(1) | chat(min 3) | status(1) | [menu(dynamic)] | input(dynamic)
+    // Split: title(1) | chat(min 3) | status(1) | [file_picker(dynamic)] | [menu(dynamic)] | input(dynamic)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),                     // title bar
             Constraint::Min(3),                        // chat area
             Constraint::Length(1),                     // status bar
+            Constraint::Length(file_picker_height),    // file picker (0 when hidden) — T1-#4
             Constraint::Length(menu_height),           // command menu (0 when hidden)
             Constraint::Length(input_rows),            // input line (dynamic)
         ])
@@ -2705,6 +3947,79 @@ fn ui(f: &mut Frame, app: &mut App) {
     let status = StatusBar::render(&sd);
     f.render_widget(status, chunks[2]);
 
+    // ── File Picker (shown when typing @ for file references) — T1-#4 ──
+    if app.file_picker_active && file_picker_height > 0 {
+        let mut picker_lines: Vec<Line> = Vec::new();
+
+        // Query line
+        picker_lines.push(Line::from(vec![
+            Span::styled(" @", Style::default().fg(Theme::ACCENT_BRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(&app.file_picker_query, Style::default().fg(Color::Rgb(200, 200, 210))),
+            Span::styled("_", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::SLOW_BLINK)),
+        ]));
+        picker_lines.push(Line::from(Span::styled(
+            "─".repeat((chunks[3].width.saturating_sub(4)) as usize),
+            Style::default().fg(Color::Rgb(60, 60, 70)),
+        )));
+
+        if app.file_picker_matches.is_empty() {
+            picker_lines.push(Line::from(Span::styled(
+                "  No matching files",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            )));
+        } else {
+            let total = app.file_picker_matches.len();
+            const VISIBLE: usize = 10;
+            let selected = app.file_picker_index.min(total.saturating_sub(1));
+            let (start, end) = if total <= VISIBLE {
+                (0, total)
+            } else if selected < VISIBLE / 2 {
+                (0, VISIBLE)
+            } else if selected + VISIBLE / 2 >= total {
+                (total - VISIBLE, total)
+            } else {
+                (selected - VISIBLE / 2, selected + VISIBLE / 2 + 1)
+            };
+            if start > 0 {
+                picker_lines.push(Line::from(Span::styled(
+                    format!("  ↑ {} more", start),
+                    Style::default().fg(Color::Rgb(80, 80, 90)),
+                )));
+            }
+            for (i, path) in app.file_picker_matches.iter().enumerate().take(end).skip(start) {
+                let is_selected = i == selected;
+                let style = if is_selected {
+                    Style::default().fg(Theme::ACCENT_BRIGHT).add_modifier(Modifier::BOLD).bg(Color::Rgb(40, 40, 50))
+                } else {
+                    Style::default().fg(Color::Rgb(180, 180, 190))
+                };
+                let marker = if is_selected { "> " } else { "  " };
+                let rel = path.strip_prefix(&app.workspace).unwrap_or(path);
+                picker_lines.push(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(Theme::ACCENT)),
+                    Span::styled(format!("{}", rel.display()), style),
+                ]));
+            }
+            if end < total {
+                picker_lines.push(Line::from(Span::styled(
+                    format!("  ↓ {} more", total - end),
+                    Style::default().fg(Color::Rgb(80, 80, 90)),
+                )));
+            }
+        }
+
+        let picker_para = Paragraph::new(Text::from(picker_lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(60, 60, 70)))
+                    .title(" File Picker (↑↓ Enter Esc) ")
+                    .title_style(Style::default().fg(Color::Rgb(100, 100, 110)))
+            )
+            .style(Style::default().bg(Theme::BG_PANEL));
+        f.render_widget(picker_para, chunks[3]);
+    }
+
     // ── Command Menu (shown when input starts with /) ──
     if app.show_command_menu && menu_height > 0 {
         let input_lower = app.input.to_lowercase();
@@ -2722,7 +4037,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled("(Tab to complete, Esc to close)", Style::default().fg(Color::Rgb(100, 100, 110))),
         ]));
         menu_lines.push(Line::from(Span::styled(
-            "─".repeat((chunks[3].width.saturating_sub(4)) as usize),
+            "─".repeat((chunks[4].width.saturating_sub(4)) as usize),
             Style::default().fg(Color::Rgb(60, 60, 70)),
         )));
 
@@ -2791,13 +4106,13 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .border_style(Style::default().fg(Color::Rgb(60, 60, 70)))
             )
             .style(Style::default().bg(Theme::BG_PANEL));
-        f.render_widget(menu_para, chunks[3]);
+        f.render_widget(menu_para, chunks[4]);
     }
 
     // ── Input Line (CodeWhale 1:1 port) ──
     // layout_input_with_scroll is the single source of truth for both rendering
     // and cursor position — they can never drift.
-    let input_inner_width = area.width.saturating_sub(4) as usize;
+    let input_inner_width = input_inner_width_u16 as usize;
     let input_inner_height = input_rows.saturating_sub(2).max(1); // subtract block borders
     let input_rows_budget = composer_input_rows_budget(input_inner_height);
     let cursor_off = input_prompt.chars().count() + app.input_cursor;
@@ -2808,26 +4123,58 @@ fn ui(f: &mut Frame, app: &mut App) {
     for _ in 0..top_padding {
         lines.push(Line::from(""));
     }
-    for line in &visible_lines {
-        lines.push(Line::from(line.as_str()));
+    // 渲染 visible_lines，cursor 所在行用反转视频 fake cursor（对齐 pi editor.ts:557）。
+    // fake cursor 保证光标隐藏或终端不支持硬件 cursor 时仍可见。
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    for (i, line) in visible_lines.iter().enumerate() {
+        if i == cursor_row {
+            let graphs: Vec<&str> = line.graphemes(true).collect();
+            let mut spans: Vec<Span> = Vec::new();
+            let mut col_acc = 0usize;
+            let mut cursor_drawn = false;
+            for g in &graphs {
+                let gw = UnicodeWidthStr::width(*g);
+                if !cursor_drawn && col_acc == cursor_col {
+                    spans.push(Span::styled(*g, cursor_style));
+                    cursor_drawn = true;
+                } else {
+                    spans.push(Span::raw(*g));
+                }
+                col_acc += gw;
+            }
+            // cursor 在行尾或超出：画反转空格
+            if !cursor_drawn {
+                spans.push(Span::styled(" ", cursor_style));
+            }
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(line.as_str()));
+        }
     }
+    let border_color = match app.thinking_level {
+        ThinkingLevel::Default => Color::Rgb(100, 100, 110),  // 灰
+        ThinkingLevel::Low => Color::Rgb(59, 130, 246),       // 蓝
+        ThinkingLevel::Medium => Color::Rgb(168, 85, 247),    // 紫
+        ThinkingLevel::High => Color::Rgb(234, 179, 8),       // 黄
+        ThinkingLevel::Max => Color::Rgb(220, 38, 38),        // 红
+    };
     let input_widget = Paragraph::new(Text::from(lines))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(50, 50, 55)))
-                .title(" Input (/ for commands) ")
+                .border_style(Style::default().fg(border_color))
+                .title(" Input (Shift+Enter 换行 · \\+Enter fallback · / 命令 · ↑↓ 历史) ")
                 .title_style(Style::default().fg(Color::Rgb(100, 100, 110)))
         )
         .style(Theme::style_input());
-    f.render_widget(input_widget, chunks[4]);
+    f.render_widget(input_widget, chunks[5]);
 
     // ── Cursor position — uses the same layout_input_with_scroll result ──
-    let cursor_x = chunks[4]
+    let cursor_x = chunks[5]
         .x
         .saturating_add(2)
         .saturating_add(cursor_col as u16);
-    let cursor_y = chunks[4]
+    let cursor_y = chunks[5]
         .y
         .saturating_add(1)
         .saturating_add((top_padding + cursor_row) as u16);
@@ -2838,9 +4185,57 @@ fn ui(f: &mut Frame, app: &mut App) {
         let dialog_area = ApprovalDialog::dialog_area(f.area());
         ApprovalDialog::render(request, choice, dialog_area, f.buffer_mut());
     }
+
+    // ── Settings Dialog Overlay (T3-#15) ──
+    if let Some(ref dialog) = app.settings_dialog {
+        let dialog_area = SettingsDialog::dialog_area(f.area());
+        dialog.render(dialog_area, f.buffer_mut());
+    }
 }
 
 // ── Helpers ──
+
+/// Extract the last whitespace-delimited token from input (up to cursor).
+/// Returns None if the token is empty.
+fn extract_path_prefix(input: &str, cursor: usize) -> Option<String> {
+    let prefix: String = input.chars().take(cursor).collect();
+    let last_token = prefix.rsplit(|c: char| c.is_whitespace()).next()?;
+    if last_token.is_empty() { return None; }
+    Some(last_token.to_string())
+}
+
+/// Try to complete a path prefix by scanning the filesystem.
+/// Returns a list of matching full paths (relative or absolute).
+fn complete_path(prefix: &str) -> Option<Vec<String>> {
+    let path = std::path::Path::new(prefix);
+    let (dir, name_prefix) = if path.is_dir() {
+        (path.to_path_buf(), String::new())
+    } else {
+        let parent = path.parent()?.to_path_buf();
+        let fname = path.file_name()?.to_string_lossy().to_string();
+        (parent, fname)
+    };
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut matches: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(&name_prefix) {
+                let full = dir.join(&name).to_string_lossy().to_string();
+                // Normalize backslashes to forward slashes for consistency
+                Some(full.replace('\\', "/"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if matches.is_empty() {
+        None
+    } else {
+        matches.sort();
+        Some(matches)
+    }
+}
 
 fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -2849,6 +4244,16 @@ fn clip(text: &str, max: usize) -> String {
         let truncated: String = text.chars().take(max.saturating_sub(3)).collect();
         format!("{}...", truncated)
     }
+}
+
+/// P2: 从队列中取出下一条要交付的消息（steering 优先于 follow-up）。
+/// 纯逻辑，便于在不构造 App 的情况下单元测试。
+fn dequeue_next_from(queue: &mut Vec<QueuedMessage>) -> Option<QueuedMessage> {
+    let idx = queue
+        .iter()
+        .position(|m| m.kind == QKind::Steering)
+        .or_else(|| queue.iter().position(|m| m.kind == QKind::FollowUp))?;
+    Some(queue.remove(idx))
 }
 
 fn summarize(text: &str, max: usize) -> String {
@@ -2862,24 +4267,23 @@ fn summarize(text: &str, max: usize) -> String {
 }
 
 /// Hard-wrap `text` by display width so the rendered lines exactly match the
-/// cursor position calculation.  This avoids the mismatch between ratatui's
-/// word-wrap and our cursor math, which caused the cursor to float below the
-/// visible text.
+/// cursor position calculation.  Uses grapheme clusters (与 `cursor_row_col` 一致)
+/// so multi-byte / emoji / 组合字符的行列计算与光标定位不会漂移。
 fn wrap_input_lines(input: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = vec![String::new()];
     let mut line_width = 0usize;
-    for ch in input.chars() {
-        if ch == '\n' {
+    for grapheme in input.graphemes(true) {
+        if grapheme == "\n" {
             lines.push(String::new());
             line_width = 0;
             continue;
         }
-        let w = UnicodeWidthStr::width(ch.to_string().as_str());
+        let w = UnicodeWidthStr::width(grapheme);
         if line_width + w > width && !lines.last().unwrap().is_empty() {
             lines.push(String::new());
             line_width = 0;
         }
-        lines.last_mut().unwrap().push(ch);
+        lines.last_mut().unwrap().push_str(grapheme);
         line_width += w;
     }
     if lines.len() == 1 && lines[0].is_empty() {
@@ -3250,5 +4654,174 @@ mod tests {
             FocusTarget::Chat => FocusTarget::Input,
         };
         assert_eq!(focus, FocusTarget::Input);
+    }
+
+    // ── P2: message queue dequeue logic tests ──
+
+    fn qmsg(text: &str, kind: QKind) -> QueuedMessage {
+        QueuedMessage { text: text.to_string(), kind }
+    }
+
+    #[test]
+    fn dequeue_empty_returns_none() {
+        let mut queue: Vec<QueuedMessage> = Vec::new();
+        assert!(dequeue_next_from(&mut queue).is_none());
+    }
+
+    #[test]
+    fn dequeue_single_steering() {
+        let mut queue = vec![qmsg("hello", QKind::Steering)];
+        let msg = dequeue_next_from(&mut queue).expect("non-empty");
+        assert_eq!(msg.text, "hello");
+        assert_eq!(msg.kind, QKind::Steering);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn dequeue_single_followup() {
+        let mut queue = vec![qmsg("world", QKind::FollowUp)];
+        let msg = dequeue_next_from(&mut queue).expect("non-empty");
+        assert_eq!(msg.text, "world");
+        assert_eq!(msg.kind, QKind::FollowUp);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn dequeue_steering_before_followup() {
+        // follow-up 排在前面，但 steering 应优先取出
+        let mut queue = vec![
+            qmsg("first-followup", QKind::FollowUp),
+            qmsg("second-steering", QKind::Steering),
+        ];
+        let msg = dequeue_next_from(&mut queue).expect("non-empty");
+        assert_eq!(msg.text, "second-steering");
+        assert_eq!(msg.kind, QKind::Steering);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn dequeue_preserves_steering_order() {
+        // 多条 steering 按插入顺序取
+        let mut queue = vec![
+            qmsg("s1", QKind::Steering),
+            qmsg("s2", QKind::Steering),
+            qmsg("f1", QKind::FollowUp),
+        ];
+        let m1 = dequeue_next_from(&mut queue).unwrap();
+        assert_eq!(m1.text, "s1");
+        let m2 = dequeue_next_from(&mut queue).unwrap();
+        assert_eq!(m2.text, "s2");
+        let m3 = dequeue_next_from(&mut queue).unwrap();
+        assert_eq!(m3.text, "f1");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn dequeue_followup_only_in_order() {
+        let mut queue = vec![
+            qmsg("f1", QKind::FollowUp),
+            qmsg("f2", QKind::FollowUp),
+        ];
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "f1");
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "f2");
+        assert!(dequeue_next_from(&mut queue).is_none());
+    }
+
+    #[test]
+    fn dequeue_steering_interleaved_with_followup() {
+        // steering 插队到 follow-up 之前
+        let mut queue = vec![
+            qmsg("f1", QKind::FollowUp),
+            qmsg("f2", QKind::FollowUp),
+            qmsg("s1", QKind::Steering),
+            qmsg("f3", QKind::FollowUp),
+        ];
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "s1");
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "f1");
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "f2");
+        assert_eq!(dequeue_next_from(&mut queue).unwrap().text, "f3");
+        assert!(queue.is_empty());
+    }
+
+    // ── P0.1/P0.2/P0.3 v2: 多行输入渲染 + cursor 定位测试 ──
+    // App 方法（navigate_history / push_undo / push_kill_ring）依赖复杂构造，
+    // 此处通过自由函数验证多行渲染与 cursor 计算的正确性，App 方法行为由手动 TUI 测试覆盖。
+
+    #[test]
+    fn wrap_input_lines_cjk_mixed() {
+        // CJK (width 2) + ASCII (width 1) 混合换行
+        let result = wrap_input_lines("你好abc", 4);
+        // '你'(2) + '好'(2) = 4 → 第一行满；'a'(1)+'b'(1)+'c'(1) = 3 → 第二行
+        assert_eq!(result, vec!["你好", "abc"]);
+    }
+
+    #[test]
+    fn wrap_input_lines_multiline_with_cjk() {
+        // 显式 \n + CJK 换行
+        let result = wrap_input_lines("你好\n世界\n", 10);
+        assert_eq!(result, vec!["你好", "世界"]);
+    }
+
+    #[test]
+    fn cursor_row_col_multiline_second_line() {
+        // "ab\ncd" cursor 在 'c' (char index 3) → row 1, col 0
+        let (row, col) = cursor_row_col("ab\ncd", 3, 10);
+        assert_eq!(row, 1);
+        assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn cursor_row_col_multiline_end_of_first_line() {
+        // "ab\ncd" cursor 在 '\n' 之后 (char index 3) → row 1, col 0
+        // cursor 在 'b' (char index 1) → row 0, col 1
+        let (row, col) = cursor_row_col("ab\ncd", 1, 10);
+        assert_eq!(row, 0);
+        assert_eq!(col, 1);
+    }
+
+    #[test]
+    fn cursor_row_col_cjk_width_accounted() {
+        // "你好" cursor 在 '好' (char index 1) → col 应为 2（'你' 占 2 列）
+        let (row, col) = cursor_row_col("你好", 1, 10);
+        assert_eq!(row, 0);
+        assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn layout_input_with_scroll_multiline_cursor_visible() {
+        // 多行 input，cursor 在第 2 行，max_height 足够大 → cursor 行可见
+        let input = "line1\nline2\nline3";
+        let (visible, cursor_row, _cursor_col, start) =
+            layout_input_with_scroll(input, 7, 80, 10); // cursor 在 'l' of line2
+        assert_eq!(start, 0);
+        assert_eq!(visible.len(), 3);
+        assert_eq!(cursor_row, 1);
+    }
+
+    #[test]
+    fn layout_input_with_scroll_scrolls_to_cursor() {
+        // 5 行 input，max_height=2，cursor 在最后一行 → start 滚动到 cursor 可见
+        let input = "l1\nl2\nl3\nl4\nl5";
+        // char indices: 0='l'1='1'2='\n'3='l'4='2'5='\n'6='l'7='3'8='\n'9='l'10='4'11='\n'12='l'13='5'
+        // cursor=12 → 'l' of l5 → row=4, col=0
+        let (visible, cursor_row, _cursor_col, start) =
+            layout_input_with_scroll(input, 12, 80, 2);
+        assert_eq!(start, 3); // 从第 3 行开始显示（l4, l5）
+        assert_eq!(visible, vec!["l4", "l5"]);
+        assert_eq!(cursor_row, 1); // cursor 在可见区的第 1 行
+    }
+
+    #[test]
+    fn composer_top_padding_empty_input() {
+        // 空内容（1 行）+ budget 3 → padding 2（顶对齐填充）
+        assert_eq!(super::composer_top_padding(1, 3), 2);
+    }
+
+    #[test]
+    fn wrap_input_lines_emoji_zwj() {
+        // emoji + CJK 混合，grapheme 分割正确（不崩 panic）
+        let result = wrap_input_lines("a😀b", 2);
+        // 'a'(1) → 第一行；'😀'(2) → 第二行；'b'(1) → 第三行
+        assert_eq!(result, vec!["a", "😀", "b"]);
     }
 }

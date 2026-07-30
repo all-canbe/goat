@@ -50,6 +50,7 @@ const mockThemeStore = vi.hoisted(() => ({
 const mockWorkspaceStore = vi.hoisted(() => ({
   loadWorkspace: vi.fn().mockResolvedValue(undefined),
   setWorkspace: vi.fn().mockResolvedValue(undefined),
+  setTemporaryWorkspace: vi.fn().mockResolvedValue(undefined),
   workspace: null as { path: string; is_temporary: boolean } | null,
 }));
 
@@ -73,6 +74,12 @@ vi.mock("../../stores/sessionStore", () => ({
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: (selector?: (s: typeof mockChatStore) => unknown) =>
     selector ? selector(mockChatStore) : mockChatStore,
+  useActiveSessionState: () => ({
+    planContent: mockChatStore.planContent,
+    pendingApprovals: mockChatStore.pendingApprovals,
+    toolCallCount: mockChatStore.toolCallCount,
+    tokenUsage: mockChatStore.tokenUsage,
+  }),
 }));
 
 vi.mock("../../stores/changesStore", () => ({

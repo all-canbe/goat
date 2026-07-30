@@ -29,7 +29,7 @@ pub use provider::impls::{OpenAiCompatibleProvider, AnthropicProvider};
 pub use provider::switch::ProviderSwitch;
 pub use security::approval::{ApprovalEngine, AgentMode, Decision, ToolCategory, ApprovalDecision, ApprovalResponder, ApprovalScope, SessionCacheKey, calculate_danger_score};
 pub use security::sandbox::{Sandbox, SandboxLevel, SandboxError, create_sandbox};
-pub use tools::registry::{ToolRegistry, Tool, ToolResult};
+pub use tools::registry::{ToolRegistry, Tool, ToolResult, ToolStreamEvent, ToolExecutionContext};
 pub use tools::ask_user::AskUserTool;
 pub use conversation::manager::ConversationManager;
 pub use memory::vector_store::VectorMemory;

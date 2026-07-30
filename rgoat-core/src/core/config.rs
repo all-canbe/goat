@@ -80,6 +80,10 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules_dir: Option<String>,
 
+    /// Web search 配置
+    #[serde(default, skip_deserializing)]
+    pub web_search: WebSearchConfig,
+
     /// Hook 配置（原版 Goat 格式，当前为只读保存，功能待实现）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<serde_json::Value>,
@@ -104,6 +108,14 @@ pub struct ProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
 }
+
+/// Web search 配置
+///
+/// 内置 WebSearch 固定使用 DuckDuckGo HTML 免费搜索；专业、付费、认证或
+/// 企业检索请通过 MCP 工具接入。旧配置中的 `provider` 字段已废弃，
+/// 反序列化时被忽略。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebSearchConfig {}
 
 // ============================================================================
 // 默认值
@@ -151,6 +163,7 @@ impl Default for Settings {
             max_agent_turns: default_max_turns(),
             mcp_config_path: None,
             rules_dir: None,
+            web_search: WebSearchConfig::default(),
             hooks: None,
             workspace: None,
         }
@@ -163,8 +176,7 @@ impl Settings {
         let path = settings_path();
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            let mut settings: Settings = serde_json::from_str(&content)?;
-            let migrated = settings.migrate_if_needed();
+            let (settings, migrated) = Self::parse_and_migrate(&content)?;
             if migrated {
                 // 立即持久化迁移结果
                 let _ = settings.save();
@@ -175,6 +187,27 @@ impl Settings {
             settings.save()?;
             Ok(settings)
         }
+    }
+
+    /// 从指定路径加载配置，自动迁移旧格式（不持久化）。
+    ///
+    /// 与 [`load`](Self::load) 的区别：不读取用户配置目录，也不在文件缺失时
+    /// 创建默认配置，仅对给定路径执行「读取 + 解析 + 迁移」。迁移结果不写回磁盘，
+    /// 适合测试用 TempDir fixture 加载固定旧格式 JSON，避免触碰真实
+    /// `~/.goat/setting.json`。
+    pub fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
+        let content = std::fs::read_to_string(path)?;
+        let (settings, _migrated) = Self::parse_and_migrate(&content)?;
+        Ok(settings)
+    }
+
+    /// 读取并迁移一段 settings JSON 文档，返回迁移后的配置与是否发生迁移。
+    /// 纯函数（不写盘），供 [`load`](Self::load) 与
+    /// [`load_from_path`](Self::load_from_path) 共用以避免逻辑重复。
+    fn parse_and_migrate(content: &str) -> Result<(Self, bool), ConfigError> {
+        let mut settings: Settings = serde_json::from_str(content)?;
+        let migrated = settings.migrate_if_needed();
+        Ok((settings, migrated))
     }
 
     /// 加载配置，如果文件不存在则返回空配置（不自动创建默认 provider）
@@ -202,6 +235,7 @@ impl Settings {
                 max_agent_turns: default_max_turns(),
                 mcp_config_path: None,
                 rules_dir: None,
+                web_search: WebSearchConfig::default(),
                 hooks: None,
                 workspace: None,
             })

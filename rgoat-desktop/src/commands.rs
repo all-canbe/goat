@@ -1237,18 +1237,17 @@ pub async fn get_agent_status(
 /// 统一清理指定会话的运行时资源（取消令牌、abort handle、移除四类 map 条目）。
 /// 每个锁作用域结束后才获取下一个锁，避免嵌套持有多个 MutexGuard。
 fn cancel_session_runtime_resources(state: &AppState, session_id: &str) {
-    if let Ok(cancellations) = state.agent_cancellations.lock() {
+    // 合并 agent_cancellations 的两次锁获取为一次
+    if let Ok(mut cancellations) = state.agent_cancellations.lock() {
         if let Some(token) = cancellations.get(session_id) {
             token.cancel();
         }
+        cancellations.remove(session_id);
     }
     if let Ok(mut handles) = state.agent_handles.lock() {
         if let Some(handle) = handles.remove(session_id) {
             handle.abort();
         }
-    }
-    if let Ok(mut map) = state.agent_cancellations.lock() {
-        map.remove(session_id);
     }
     if let Ok(mut map) = state.agent_paused_flags.lock() {
         map.remove(session_id);

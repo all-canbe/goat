@@ -36,6 +36,8 @@ pub enum EventType {
     Usage,
     ApprovalRequired,
     AgentCancelled,
+    /// P2-1: 工具运行时增量输出流事件
+    ToolStreamUpdate,
 }
 
 /// 事件数据结构

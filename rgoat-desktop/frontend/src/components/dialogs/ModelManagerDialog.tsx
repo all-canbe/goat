@@ -163,7 +163,7 @@ export default function ModelManagerDialog({
           <Search size={16} className="text-text-secondary shrink-0" />
           <input
             type="text"
-            className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-tertiary"
+            className="flex-1 bg-transparent text-sm text-text outline-none focus-visible:outline-none placeholder:text-text-tertiary"
             placeholder="搜索 Provider..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}

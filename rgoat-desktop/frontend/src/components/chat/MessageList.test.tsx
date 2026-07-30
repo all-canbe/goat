@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import MessageList from "./MessageList";
 import type { ChatMessage } from "../../stores/chatStore";
@@ -14,10 +14,22 @@ const mockStore = vi.hoisted(() => ({
 
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: () => mockStore,
+  useActiveSessionState: () => ({
+    messages: mockStore.messages,
+    streamingContent: mockStore.streamingContent,
+    isStreaming: mockStore.isStreaming,
+    compactionNotices: mockStore.compactionNotices,
+  }),
 }));
 
 describe("MessageList", () => {
-  it("renders dividers between consecutive Agent messages", () => {
+  beforeEach(() => {
+    mockStore.messages = [];
+    mockStore.streamingContent = "";
+    mockStore.isStreaming = false;
+  });
+
+  it("renders assistant and tool calls in timeline order without dividers", () => {
     mockStore.messages = [
       { id: "1", type: "assistant", content: "Hello" },
       { id: "2", type: "tool_call", toolName: "read_file", arguments: {} },
@@ -26,11 +38,14 @@ describe("MessageList", () => {
     ];
     render(<MessageList />);
 
+    // 生产级时间线：不再用 divider 把工具区割裂
     const dividers = document.querySelectorAll(".border-t.border-divider");
-    expect(dividers).toHaveLength(3);
+    expect(dividers).toHaveLength(0);
+    expect(screen.getByText("Hello")).toBeInTheDocument();
+    expect(screen.getByText("Done")).toBeInTheDocument();
   });
 
-  it("does not render divider before the first message or after user messages", () => {
+  it("keeps user/assistant turns without artificial dividers", () => {
     mockStore.messages = [
       { id: "1", type: "assistant", content: "Hello" },
       { id: "2", type: "user", content: "Question" },
@@ -40,6 +55,30 @@ describe("MessageList", () => {
 
     const dividers = document.querySelectorAll(".border-t.border-divider");
     expect(dividers).toHaveLength(0);
+  });
+
+  it("keeps messages in a centered content column within the scroll area", () => {
+    mockStore.messages = [{ id: "1", type: "assistant", content: "Hello" }];
+    render(<MessageList />);
+
+    expect(screen.getByTestId("message-list-scroll")).toHaveClass(
+      "overflow-y-auto",
+      "pb-56"
+    );
+    expect(screen.getByTestId("chat-content-column")).toHaveClass(
+      "w-full",
+      "max-w-[840px]",
+      "mx-auto"
+    );
+  });
+
+  it("shows a waiting indicator before the first streamed token", () => {
+    mockStore.messages = [{ id: "1", type: "user", content: "Question" }];
+    mockStore.streamingContent = "";
+    mockStore.isStreaming = true;
+    render(<MessageList />);
+
+    expect(screen.getByText("正在生成回复…")).toBeInTheDocument();
   });
 
   it("renders empty-state example cards with focus-ring classes", () => {

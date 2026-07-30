@@ -25,7 +25,7 @@ use rgoat_core::core::event_bus::EventBus;
 use rgoat_core::memory::vector_store::VectorMemory;
 use rgoat_core::provider::provider::LlmProvider;
 use rgoat_core::provider::switch::ProviderSwitch;
-use rgoat_core::security::approval::{AgentMode, ApprovalDecision, ApprovalEngine, ApprovalResponder};
+use rgoat_core::security::approval::{AgentMode, ApprovalEngine, ApprovalResponder};
 use rgoat_core::tools::registry::ToolRegistry;
 
 /// 共享可切换的工作空间运行时 — 绑定 workspace + tools + agent
@@ -34,6 +34,7 @@ pub struct WorkspaceRuntime {
     pub temporary: bool,
     pub tools: Arc<ToolRegistry>,
     pub agent: Arc<ReActAgent>,
+    pub approval_responder: ApprovalResponder,
 }
 
 /// 返回临时工作空间的路径（在 app data 目录下）
@@ -77,13 +78,14 @@ pub fn create_workspace_runtime(
         cancellation,
         AgentMode::Agent,
         paused,
-        approval_responder,
+        approval_responder.clone(),
     ));
     WorkspaceRuntime {
         workspace,
         temporary,
         tools,
         agent,
+        approval_responder,
     }
 }
 
@@ -95,27 +97,19 @@ pub struct AppState {
     pub switch: Arc<ProviderSwitch>,
     pub approval: Arc<ApprovalEngine>,
     pub settings: Arc<Mutex<Settings>>,
-    /// Frontend can respond to approval requests by calling respond_approval
-    pub pending_approval: Arc<Mutex<Option<PendingApproval>>>,
     /// Frontend can respond to ask_user requests by calling respond_ask_user.
     /// 外层 Mutex 用于切换 workspace 时替换内层 Arc；内层 Mutex 保护 HashMap。
     pub pending_ask_user: Arc<Mutex<Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>>>,
-    /// Cancellation token for stopping the running agent
-    pub agent_cancellation: CancellationToken,
-    /// Whether the agent is paused at a step boundary
-    pub agent_paused: Arc<AtomicBool>,
-    /// Handle to the currently running agent task
-    pub agent_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// 多会话并发：session_id → cancellation token（每个会话独立取消）
+    pub agent_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// 多会话并发：session_id → paused flag（每个会话独立暂停）
+    pub agent_paused_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// 多会话并发：session_id → 运行中的 agent 任务句柄
+    pub agent_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// 多会话并发：session_id → 审批响应器（每个会话独立审批通道）
+    pub approval_responders: Arc<Mutex<HashMap<String, ApprovalResponder>>>,
     /// D1-T03: 会话内文件变更记录 — session_id → changes
     pub session_changes: Arc<Mutex<HashMap<String, Vec<FileChangeRecord>>>>,
-}
-
-/// Represents a pending approval request awaiting frontend response
-pub struct PendingApproval {
-    pub tool_name: String,
-    pub args: serde_json::Value,
-    /// D1-T03: 改为携带完整 ApprovalDecision（含 scope）而非 bool
-    pub sender: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
 /// D1-T03: 单个文件变更记录（前端 invoke add_session_change 时序列化）
@@ -189,11 +183,12 @@ pub fn run() {
                 "main",
                 WebviewUrl::App("index.html".into()),
             )
-            .title("RGoat — AI Coding Assistant")
-            .inner_size(900.0, 700.0)
-            .min_inner_size(600.0, 400.0)
+            .title("Goat — AI Coding Assistant")
+            .inner_size(1400.0, 900.0)
+            .min_inner_size(800.0, 500.0)
             .center()
             .resizable(true)
+            .decorations(false)
             .build()?;
 
             Ok(())
@@ -201,6 +196,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::send_prompt,
             commands::get_sessions,
+            commands::get_session_messages,
             commands::create_session,
             commands::delete_session,
             commands::rename_session,
@@ -214,6 +210,8 @@ pub fn run() {
             commands::delete_provider,
             commands::respond_approval,
             commands::list_workspace_files,
+            commands::list_directory,
+            commands::read_workspace_file,
             commands::cancel_agent,
             commands::pause_agent,
             commands::resume_agent,
@@ -229,6 +227,11 @@ pub fn run() {
             // Workspace 管理
             commands::get_workspace,
             commands::set_workspace,
+            commands::set_temporary_workspace,
+            // Native Window 控制
+            commands::minimize_window,
+            commands::toggle_maximize_window,
+            commands::close_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -241,7 +244,7 @@ async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::erro
     let temp_path = ensure_temporary_workspace()?;
     let workspace_str = temp_path.display().to_string();
 
-    let event_bus = Arc::new(EventBus::new(256));
+    let event_bus = Arc::new(EventBus::new(1024));
     let conversation = Arc::new(ConversationManager::new().await?);
     let approval = Arc::new(ApprovalEngine::new());
     let agent_cancellation = CancellationToken::new();
@@ -288,11 +291,11 @@ async fn init_app_state() -> Result<(AppState, Arc<EventBus>), Box<dyn std::erro
             switch,
             approval,
             settings: Arc::new(Mutex::new(settings)),
-            pending_approval: Arc::new(Mutex::new(None)),
             pending_ask_user,
-            agent_cancellation,
-            agent_paused,
-            agent_handle: Arc::new(Mutex::new(None)),
+            agent_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            agent_paused_flags: Arc::new(Mutex::new(HashMap::new())),
+            agent_handles: Arc::new(Mutex::new(HashMap::new())),
+            approval_responders: Arc::new(Mutex::new(HashMap::new())),
             session_changes: Arc::new(Mutex::new(HashMap::new())),
         },
         event_bus,

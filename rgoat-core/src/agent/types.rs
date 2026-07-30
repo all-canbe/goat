@@ -88,7 +88,7 @@ pub enum AgentEvent {
     Finished { answer: String, steps: usize },
     /// 错误
     Error { message: String },
-    /// 流式逐词推送（按空格分词后的单个词）
+    /// 流式逐块推送（按 Provider 文本 chunk 粒度）
     MessageDelta { delta: String },
     /// Token 使用统计（流式结束后发送）
     Usage { input_tokens: u64, output_tokens: u64 },

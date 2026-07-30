@@ -13,7 +13,7 @@ import {
   Globe,
   Wrench,
 } from "lucide-react";
-import { useChatStore, type ApprovalData, type ApprovalScope } from "../../stores/chatStore";
+import { useChatStore, useActiveSessionState, type ApprovalData, type ApprovalScope } from "../../stores/chatStore";
 import DiffViewer from "../diff/DiffViewer";
 import DiffSummary from "../diff/DiffSummary";
 import ApprovalScopeSelector from "./ApprovalScopeSelector";
@@ -135,7 +135,8 @@ function GenericApprovalView({ data }: { data: ApprovalData }) {
 // ── 主组件 ───────────────────────────────────────────────────────
 
 export default function ApprovalDialog() {
-  const { pendingApproval, respondApproval, setApproval } = useChatStore();
+  const { pendingApproval } = useActiveSessionState();
+  const { respondApproval, setApproval } = useChatStore();
 
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -158,17 +159,15 @@ export default function ApprovalDialog() {
       const finalScope = scopeOverride || scope;
       setStatus("loading");
       try {
+        // respondApproval 内部已 setApproval(null, sid)；勿再延迟清空，避免切会话后误清新审批
         await respondApproval(approved, finalScope);
         setStatus("success");
-        setTimeout(() => {
-          setApproval(null);
-        }, 400);
       } catch (err) {
         setStatus("error");
         setErrorMessage(err instanceof Error ? err.message : "Failed to respond");
       }
     },
-    [pendingApproval, status, scope, respondApproval, setApproval]
+    [pendingApproval, status, scope, respondApproval]
   );
 
   // 键盘快捷键：Y/A/S/W/N/Esc

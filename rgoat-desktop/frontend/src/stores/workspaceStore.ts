@@ -15,6 +15,9 @@ let switchTimerId: ReturnType<typeof setTimeout> | null = null;
 /** 模块级 generation 计数器：每次新调度/取消时递增，使旧回调的 RPC 结果失效 */
 let switchGeneration = 0;
 
+/** 当前悬挂的 Promise resolver，用于取消时 reject 避免调用方永久挂起 */
+let pendingSwitchResolve: ((value: boolean) => void) | null = null;
+
 interface WorkspaceState {
   workspace: WorkspaceInfo | null;
   /** 延迟切换期间的目标路径；非 null 时组件应显示等待占位 */
@@ -83,10 +86,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     switchGeneration += 1;
     const capturedGeneration = switchGeneration;
 
-    // 清除已有定时器
+    // 清除已有定时器，并 reject 旧 Promise 避免调用方永久挂起
     if (switchTimerId !== null) {
       clearTimeout(switchTimerId);
       switchTimerId = null;
+    }
+    if (pendingSwitchResolve !== null) {
+      pendingSwitchResolve(false);
+      pendingSwitchResolve = null;
     }
 
     // 无关联工作区：立即清空文件树
@@ -104,8 +111,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // 标记 pending，5 秒后真正切换
     set({ pendingWorkspacePath: path });
     return new Promise<boolean>((resolve) => {
+      pendingSwitchResolve = resolve;
       switchTimerId = setTimeout(async () => {
         switchTimerId = null;
+        pendingSwitchResolve = null;
         const success = await invokeWorkspaceSwitch(path, capturedGeneration);
         // 仅当 generation 仍为最新时才清理 pending（旧回调不清理）
         if (capturedGeneration === switchGeneration) {
@@ -121,6 +130,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (switchTimerId !== null) {
       clearTimeout(switchTimerId);
       switchTimerId = null;
+    }
+    if (pendingSwitchResolve !== null) {
+      pendingSwitchResolve(false);
+      pendingSwitchResolve = null;
     }
     set({ pendingWorkspacePath: null });
   },

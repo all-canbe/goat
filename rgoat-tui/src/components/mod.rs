@@ -9,6 +9,6 @@ pub mod diff_view;
 pub mod approval_dialog;
 pub mod work_sidebar;
 pub mod markdown;
+pub mod settings_dialog;
 
 pub use work_sidebar::{WorkSidebar, WorkSidebarData};
-

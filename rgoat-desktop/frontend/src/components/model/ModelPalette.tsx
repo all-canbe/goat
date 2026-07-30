@@ -160,14 +160,14 @@ export default function ModelPalette({
   const isDropdown = variant === "dropdown";
 
   const containerClass = isDropdown
-    ? "absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md w-full min-w-[320px] max-w-[420px] overflow-hidden"
+    ? "absolute bottom-full left-0 mb-2 z-50 bg-surface border border-border rounded-lg shadow-xl w-full min-w-[320px] max-w-[420px] overflow-hidden"
     : "bg-surface border border-border rounded-lg shadow-2xl w-full max-w-[480px] mx-4 overflow-hidden";
 
   const wrapper = isDropdown ? (
     <>
       <div
         data-testid="model-palette-backdrop"
-        className="fixed inset-0 z-20"
+        className="fixed inset-0 z-40"
         onClick={onClose}
       />
       <div className={containerClass}>
@@ -195,7 +195,7 @@ export default function ModelPalette({
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-tertiary"
+            className="flex-1 bg-transparent text-sm text-text outline-none focus-visible:outline-none placeholder:text-text-tertiary"
             placeholder="Search provider / model..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}

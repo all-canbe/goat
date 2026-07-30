@@ -5,3 +5,8 @@ pub mod web_search;
 pub mod web_fetch;
 pub mod task_tool;
 pub mod ask_user;
+pub mod file_mutation_queue;
+pub mod read_file;
+pub mod write_file;
+pub mod edit_file;
+pub mod shell;

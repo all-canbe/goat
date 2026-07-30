@@ -10,13 +10,14 @@ import PlanPreviewDialog from "../dialogs/PlanPreviewDialog";
 import SettingsDialog from "../dialogs/SettingsDialog";
 import AddProviderDialog from "../dialogs/AddProviderDialog";
 import ModelManagerDialog from "../dialogs/ModelManagerDialog";
+import WorkspaceSessionDialog from "../dialogs/WorkspaceSessionDialog";
 import CommandPalette from "../command/CommandPalette";
 import Toaster from "../feedback/Toaster";
 import { useAgentEvents } from "../../hooks/useAgentEvents";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { useConfigStore } from "../../stores/configStore";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, useActiveSessionState } from "../../stores/chatStore";
 import { useChangesStore } from "../../stores/changesStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -24,6 +25,10 @@ import { useToastStore } from "../../stores/toastStore";
 
 // P1: Sidebar 折叠状态 localStorage key
 const SIDEBAR_COLLAPSED_KEY = "sidebar_collapsed";
+// 右侧面板宽度持久化
+const RIGHT_PANEL_WIDTH_KEY = "right_panel_width";
+const MIN_RIGHT_PANEL_WIDTH = 240;
+const MAX_RIGHT_PANEL_WIDTH = 600;
 
 export default function AppLayout() {
   const { isStreaming } = useAgentEvents();
@@ -35,6 +40,7 @@ export default function AppLayout() {
   // Provider 管理弹窗状态（根层渲染，避免被 Composer transform 容器裁切）
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [showManageProviders, setShowManageProviders] = useState(false);
+  const [showWorkspaceSession, setShowWorkspaceSession] = useState(false);
   // P1: 从 localStorage 初始化折叠状态
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -45,16 +51,38 @@ export default function AppLayout() {
   });
   // 右侧面板可见性
   const [rightPanelVisible, setRightPanelVisible] = useState(true);
+  // 右侧面板宽度（localStorage 持久化，读取时 clamp 到 [240, 600]）
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
+    try {
+      const stored = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
+      if (!Number.isFinite(stored)) return 320;
+      return Math.min(
+        MAX_RIGHT_PANEL_WIDTH,
+        Math.max(MIN_RIGHT_PANEL_WIDTH, stored),
+      );
+    } catch {
+      return 320;
+    }
+  });
+  const handleRightPanelWidthChange = useCallback((w: number) => {
+    const clamped = Math.min(
+      MAX_RIGHT_PANEL_WIDTH,
+      Math.max(MIN_RIGHT_PANEL_WIDTH, w),
+    );
+    setRightPanelWidth(clamped);
+    try {
+      localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(clamped));
+    } catch {
+      // localStorage 不可用时静默忽略
+    }
+  }, []);
 
   const { createSession, loadSessions } = useSessionStore();
-  const { clearMessages, triggerFocusInput, planContent, clearPlanContent } = useChatStore();
-  const { loadWorkspace, setWorkspace } = useWorkspaceStore();
+  const { planContent, pendingApprovals, toolCallCount, tokenUsage } = useActiveSessionState();
+  const { clearMessages, triggerFocusInput, clearPlanContent } = useChatStore();
+  const { loadWorkspace, setWorkspace, setTemporaryWorkspace, workspace } = useWorkspaceStore();
   const addToast = useToastStore((s) => s.addToast);
 
-  // D1-T07: 从 store 读取统计计数
-  const pendingApprovals = useChatStore((s) => s.pendingApprovals);
-  const toolCallCount = useChatStore((s) => s.toolCallCount);
-  const tokenUsage = useChatStore((s) => s.tokenUsage);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const changesBySession = useChangesStore((s) => s.changesBySession);
   const totalChanges = activeSessionId
@@ -83,14 +111,25 @@ export default function AppLayout() {
     setRightPanelVisible((prev) => !prev);
   }, []);
 
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(() => {
+    setShowWorkspaceSession(true);
+  }, []);
+
+  const createSessionInTemporaryWorkspace = useCallback(async () => {
+    await setTemporaryWorkspace();
     clearMessages();
-    try {
-      await createSession();
-    } catch {
-      // createSession 失败时不阻断 UI
-    }
-  }, [clearMessages, createSession]);
+    await createSession();
+    setShowWorkspaceSession(false);
+  }, [setTemporaryWorkspace, clearMessages, createSession]);
+
+  const chooseWorkspaceForNewSession = useCallback(async () => {
+    const result = await openDialog({ directory: true, multiple: false });
+    if (typeof result !== "string") return;
+    await setWorkspace(result);
+    clearMessages();
+    await createSession();
+    setShowWorkspaceSession(false);
+  }, [setWorkspace, clearMessages, createSession]);
 
   const handleClearMessages = useCallback(() => {
     clearMessages();
@@ -183,7 +222,15 @@ export default function AppLayout() {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar collapsed={sidebarCollapsed} />
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onNewSession={handleNewSession}
+          onCreateSessionForWorkspace={async (path) => {
+            await setWorkspace(path);
+            clearMessages();
+            await createSession();
+          }}
+        />
 
         <div className="flex flex-col flex-1 overflow-hidden">
           {currentMode === "Plan" && (
@@ -198,7 +245,14 @@ export default function AppLayout() {
           />
         </div>
 
-        {rightPanelVisible && <RightPanel onAddWorkspace={handleAddWorkspace} />}
+        {rightPanelVisible && (
+          <RightPanel
+            onAddWorkspace={handleAddWorkspace}
+            width={rightPanelWidth}
+            onWidthChange={handleRightPanelWidthChange}
+            onCollapse={() => setRightPanelVisible(false)}
+          />
+        )}
       </div>
 
       {/* Status bar */}
@@ -236,6 +290,14 @@ export default function AppLayout() {
         onClose={() => setSettingsOpen(false)}
         defaultMode={currentMode}
         onDefaultModeChange={handleModeChange}
+      />
+
+      <WorkspaceSessionDialog
+        isOpen={showWorkspaceSession}
+        currentWorkspace={workspace}
+        onUseTemporary={createSessionInTemporaryWorkspace}
+        onChooseDirectory={chooseWorkspaceForNewSession}
+        onClose={() => setShowWorkspaceSession(false)}
       />
 
       {/* Provider 管理弹窗（根层渲染，避免被 Composer transform 容器裁切） */}

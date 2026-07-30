@@ -39,3 +39,15 @@ openspec/
 
 # Local Git worktrees
 .worktrees/
+
+# Dev process docs
+.superpowers/
+
+# Project documentation
+/docs/
+
+# IDE config
+.trae/
+
+# Temp files
+ktop

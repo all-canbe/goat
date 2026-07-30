@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { FileText, Check, X } from "lucide-react";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, useActiveSessionState } from "../../stores/chatStore";
 
 interface PlanPreviewDialogProps {
   // P1: 接受计划时切换到 Agent Mode
@@ -13,7 +13,8 @@ interface PlanPreviewDialogProps {
 }
 
 export default function PlanPreviewDialog({ onAccept }: PlanPreviewDialogProps) {
-  const { planContent, clearPlanContent } = useChatStore();
+  const { planContent } = useActiveSessionState();
+  const { clearPlanContent } = useChatStore();
 
   // P1: Esc 关闭（拒绝）
   const handleKeyDown = useCallback(

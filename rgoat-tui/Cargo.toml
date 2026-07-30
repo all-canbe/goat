@@ -25,3 +25,5 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+arboard = "3"
+walkdir = "2"

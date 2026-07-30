@@ -6,11 +6,13 @@ import {
   ChevronDown,
   Check,
   Sparkles,
+  FileCode,
+  X,
 } from "lucide-react";
 import { tauriInvoke } from "../../lib/tauri-bridge";
 import { useConfigStore } from "../../stores/configStore";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, useActiveSessionState } from "../../stores/chatStore";
 import { useSkillStore, type SkillInfo } from "../../stores/skillStore";
 import { useToastStore } from "../../stores/toastStore";
 import ModelPalette from "../model/ModelPalette";
@@ -53,6 +55,10 @@ const HELP_TEXT = `可用 Slash 命令：
 
 可用模式：Agent / Plan / Flow / YOLO`;
 
+export function sessionTitleFromPrompt(prompt: string): string {
+  return `${Array.from(prompt).slice(0, 8).join("")}...`;
+}
+
 export default function InputPanel({ onModeChange, onAddProvider, onManageProviders }: InputPanelProps) {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<Mode>("Agent");
@@ -69,9 +75,9 @@ export default function InputPanel({ onModeChange, onAddProvider, onManageProvid
   const modeMenuRef = useRef<HTMLDivElement>(null);
 
   const { providers, currentProvider, loadProviders } = useConfigStore();
-  const { activeSessionId, setActiveSessionId } = useSessionStore();
+  const { activeSessionId, setActiveSessionId, sessions, renameSession } = useSessionStore();
+  const { isStreaming, fileRefs } = useActiveSessionState();
   const {
-    isStreaming,
     setStreaming,
     addUserMessage,
     addSystemMessage,
@@ -80,6 +86,8 @@ export default function InputPanel({ onModeChange, onAddProvider, onManageProvid
     draft,
     setDraft,
     focusInputTrigger,
+    removeFileRef,
+    clearFileRefs,
   } = useChatStore();
   const { skills, loadSkills, readSkill } = useSkillStore();
   const { addToast } = useToastStore();
@@ -223,7 +231,7 @@ ${content}
           setStreaming(true);
           const res = await tauriInvoke<SendPromptResponse>(
             "send_prompt",
-            buildPayload(promptBody)
+            { request: buildPayload(promptBody) }
           );
           if (res?.session_id) {
             setActiveSessionId(res.session_id);
@@ -247,12 +255,19 @@ ${content}
       setActiveSessionId,
       addToast,
       buildPayload,
+      activeSessionId,
     ]
   );
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || isStreaming) return;
+
+    // 计算文件引用上下文，提升到 if/else 外部以便 send_prompt 使用
+    const fileContext = fileRefs.length > 0
+      ? "\n\n---\n参考文件：\n" + fileRefs.map(r => `- ${r.path}`).join("\n")
+      : "";
+    const finalPrompt = text + fileContext;
 
     // D3-T05: 拦截 Slash 命令
     if (text.startsWith("/")) {
@@ -261,19 +276,34 @@ ${content}
       const handled = await handleSlashCommand(text);
       if (handled) return;
       // 未识别的 slash 命令 → 作为普通文本发送
-      addUserMessage(text);
+      addUserMessage(finalPrompt);
     } else {
       setInput("");
-      addUserMessage(text);
+      addUserMessage(finalPrompt);
     }
 
     try {
+      // 重命名失败不应阻断发送
+      const activeSession = sessions.find((session) => session.id === activeSessionId);
+      if (activeSession?.title === "New Session") {
+        try {
+          await renameSession(activeSession.id, sessionTitleFromPrompt(text));
+        } catch (renameErr) {
+          console.warn("[InputPanel] renameSession failed:", renameErr);
+        }
+      }
+
       setStreaming(true);
+      if (activeSessionId) {
+        useChatStore.getState().ensureSession(activeSessionId);
+      }
       const res = await tauriInvoke<SendPromptResponse>(
         "send_prompt",
-        buildPayload(text)
+        { request: buildPayload(finalPrompt) }
       );
+      clearFileRefs();
       if (res?.session_id) {
+        useChatStore.getState().ensureSession(res.session_id);
         setActiveSessionId(res.session_id);
       }
     } catch (err) {
@@ -290,6 +320,11 @@ ${content}
     handleSlashCommand,
     addToast,
     buildPayload,
+    sessions,
+    activeSessionId,
+    renameSession,
+    fileRefs,
+    clearFileRefs,
   ]);
 
   // D3-T05: 选中 Slash 项 → 插入到输入框
@@ -379,7 +414,7 @@ ${content}
     : "Select Provider";
 
   return (
-    <div className="fixed bottom-[44px] left-1/2 -translate-x-1/2 w-full max-w-[840px] px-4 z-20">
+    <div className="absolute bottom-[44px] left-1/2 -translate-x-1/2 w-full max-w-[840px] px-4 z-20">
       <div
         className={`rounded-2xl bg-surface shadow-md transition-shadow ${
           isFocused ? "shadow-lg" : "shadow-md"
@@ -387,10 +422,29 @@ ${content}
       >
         {/* 输入区：无边框 textarea，与卡片融为一体 */}
         <div className="px-4 pt-4 pb-2">
+          {fileRefs.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-2">
+              {fileRefs.map((ref) => (
+                <span
+                  key={ref.id}
+                  className="inline-flex items-center gap-1 px-2 py-1 bg-primary-subtle text-brand rounded text-xs"
+                >
+                  <FileCode size={12} />
+                  <span className="max-w-[120px] truncate">{ref.name}</span>
+                  <button
+                    onClick={() => removeFileRef(ref.id)}
+                    className="hover:text-brand-hover transition-colors"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="relative min-w-0">
             <textarea
               ref={textareaRef}
-              className="w-full bg-transparent text-text text-base placeholder:text-text-tertiary resize-none outline-none border-none focus:ring-0 min-h-[44px] max-h-[200px]"
+              className="w-full bg-transparent text-text text-base placeholder:text-text-tertiary resize-none outline-none focus-visible:outline-none border-none focus:ring-0 min-h-[44px] max-h-[200px]"
               placeholder={
                 mode === "Plan"
                   ? "在 Plan Mode 中，agent 将只读取/搜索/分析... (输入 / 查看命令)"
@@ -439,7 +493,7 @@ ${content}
         </div>
 
         {/* 底部工具栏（下巴）：附件 + 模式 + 模型 + 思考强度 + 发送 */}
-        <div className="flex items-center gap-1 px-3 pb-2">
+        <div className="flex items-center gap-1.5 px-3 pb-2 min-w-0">
           {/* 附件 */}
           <button
             type="button"
@@ -448,7 +502,7 @@ ${content}
             aria-label="添加附件"
             title="添加附件"
           >
-            <Plus size={18} />
+            <Plus size={16} />
           </button>
 
           {/* 模式下拉 */}
@@ -461,10 +515,10 @@ ${content}
               className="flex items-center gap-1 h-7 px-2 rounded-lg text-xs text-text-secondary hover:text-text hover:bg-surface-hover transition-colors whitespace-nowrap"
             >
               <span>{mode}</span>
-              <ChevronDown size={12} />
+              <ChevronDown size={11} />
             </button>
             {showModeMenu && (
-              <div className="absolute bottom-full left-0 mb-2 z-30 bg-surface border border-border rounded-lg shadow-md py-1 min-w-[120px]">
+              <div className="absolute bottom-full left-0 mb-2 z-50 bg-surface border border-border rounded-lg shadow-xl py-1 min-w-[120px]">
                 {MODES.map((m) => (
                   <button
                     key={m}
@@ -484,18 +538,18 @@ ${content}
             )}
           </div>
 
-          {/* 模型选择器（复用 ModelPalette 的 dropdown variant） */}
-          <div className="relative shrink-0">
+          {/* 模型选择器（设置灵活的最大宽度，防止将右侧控件挤出屏幕） */}
+          <div className="relative shrink-1 min-w-0">
             <button
               type="button"
               onClick={() => setShowModelPalette(true)}
               aria-label="切换模型"
               title="切换模型"
-              className="flex items-center gap-1.5 h-7 px-2 rounded-lg text-xs text-text-secondary hover:text-text hover:bg-surface-hover transition-colors whitespace-nowrap"
+              className="flex items-center gap-1 h-7 px-2 rounded-lg text-xs text-text-secondary hover:text-text hover:bg-surface-hover transition-colors whitespace-nowrap min-w-0"
             >
-              <Sparkles size={12} />
-              <span className="truncate max-w-[180px]">{modelButtonLabel}</span>
-              <ChevronDown size={12} />
+              <Sparkles size={12} className="shrink-0" />
+              <span className="truncate max-w-[80px] xs:max-w-[110px] sm:max-w-[180px]">{modelButtonLabel}</span>
+              <ChevronDown size={11} className="shrink-0" />
             </button>
             <ModelPalette
               isOpen={showModelPalette}
@@ -507,37 +561,41 @@ ${content}
           </div>
 
           {/* 思考强度 */}
-          <ThinkingLevelSelector
-            value={thinkingLevel}
-            onChange={setThinkingLevel}
-            disabled={isStreaming}
-          />
+          <div className="shrink-0">
+            <ThinkingLevelSelector
+              value={thinkingLevel}
+              onChange={setThinkingLevel}
+              disabled={isStreaming}
+            />
+          </div>
 
-          <div className="flex-1" />
+          <div className="flex-1 min-w-1" />
 
-          {/* 发送 / 取消 */}
-          {isStreaming ? (
-            <button
-              type="button"
-              onClick={handleCancel}
-              title="取消 Agent 执行"
-              aria-label="取消 Agent 执行"
-              className="shrink-0 w-8 h-8 rounded-lg bg-error text-white hover:bg-error/90 transition-colors flex items-center justify-center"
-            >
-              <Square size={14} className="fill-white" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleSend}
-              disabled={!input.trim()}
-              className="shrink-0 w-8 h-8 rounded-lg bg-primary text-white hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
-              aria-label="发送"
-              title="发送"
-            >
-              <ArrowUp size={16} />
-            </button>
-          )}
+          {/* 发送 / 取消 (固定在右侧，高优先级显现) */}
+          <div className="shrink-0 pl-1">
+            {isStreaming ? (
+              <button
+                type="button"
+                onClick={handleCancel}
+                title="取消 Agent 执行"
+                aria-label="取消 Agent 执行"
+                className="w-7 h-7 rounded-lg bg-error text-white hover:bg-error/90 transition-colors flex items-center justify-center"
+              >
+                <Square size={13} className="fill-white" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="w-7 h-7 rounded-lg bg-primary text-white hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+                aria-label="发送"
+                title="发送"
+              >
+                <ArrowUp size={15} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

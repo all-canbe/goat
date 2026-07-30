@@ -4,10 +4,13 @@
 
 use async_trait::async_trait;
 use futures::channel::mpsc;
+use futures::SinkExt;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::time::Duration;
+use tracing;
 
 use super::provider::*;
 
@@ -22,9 +25,14 @@ pub struct OpenAiCompatibleProvider {
 
 impl OpenAiCompatibleProvider {
     pub fn new(config: ProviderConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .expect("OpenAI Compatible HTTP client configuration must be valid");
         Self {
             config,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 }
@@ -87,26 +95,99 @@ impl LlmProvider for OpenAiCompatibleProvider {
             return Err(LlmError::Api { status: status.as_u16(), body: text });
         }
 
-        let full_body = resp.text().await.map_err(LlmError::Http)?;
+        // SSE streaming: use a channel to bridge the spawn block to a Stream
+        let (mut tx, rx) = mpsc::channel::<Result<StreamChunk, LlmError>>(32);
 
-        let chunks: Vec<Result<StreamChunk, LlmError>> = full_body
-            .split("\n\n")
-            .filter_map(|event| {
-                event.lines()
-                    .find(|l| l.starts_with("data: "))
-                    .and_then(|line| {
-                        let data = &line[6..]; // strip "data: "
-                        if data == "[DONE]" {
-                            None
-                        } else {
-                            Some(serde_json::from_str::<StreamChunk>(data)
-                                .map_err(|e| LlmError::Stream(e.to_string())))
+        let provider_name = self.config.name.clone();
+        let model_name = self.config.model.clone();
+        tracing::info!(
+            provider = %provider_name,
+            model = %model_name,
+            "streaming request start"
+        );
+
+        tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            let mut first_chunk_time: Option<std::time::Duration> = None;
+            let mut chunk_count: usize = 0;
+            let mut byte_stream = resp.bytes_stream();
+            let mut line_buf: Vec<u8> = Vec::new();
+            let mut current_data = Vec::<String>::new();
+            let mut saw_done = false;
+
+            while let Some(result) = byte_stream.next().await {
+                let bytes = match result {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let elapsed = start.elapsed();
+                        tracing::warn!(
+                            provider = %provider_name,
+                            model = %model_name,
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            chunk_count = chunk_count,
+                            "stream body error: {}",
+                            error
+                        );
+                        let _ = tx.send(Err(LlmError::Stream(error.to_string()))).await;
+                        return;
+                    }
+                };
+
+                line_buf.extend_from_slice(&bytes);
+
+                while let Some(newline_pos) = line_buf.iter().position(|&b| b == b'\n') {
+                    let line_bytes = &line_buf[..newline_pos];
+                    let line_bytes = if line_bytes.last() == Some(&b'\r') {
+                        &line_bytes[..line_bytes.len() - 1]
+                    } else {
+                        line_bytes
+                    };
+                    let line = String::from_utf8_lossy(line_bytes).into_owned();
+                    line_buf.drain(..=newline_pos);
+
+                    if line.is_empty() {
+                        if !current_data.is_empty() {
+                            if first_chunk_time.is_none() {
+                                first_chunk_time = Some(start.elapsed());
+                            }
+                            if !dispatch_openai_sse_event(&mut current_data, &mut saw_done, &mut tx).await {
+                                return;
+                            }
+                            if !saw_done {
+                                chunk_count += 1;
+                            }
                         }
-                    })
-            })
-            .collect();
+                        continue;
+                    }
 
-        Ok(Box::pin(futures::stream::iter(chunks)))
+                    if let Some(data) = line.strip_prefix("data:") {
+                        current_data.push(data.trim_start().to_owned());
+                    }
+                    // 忽略 event:, id:, retry:, :comment 等非 data 行
+                }
+            }
+
+            if !current_data.is_empty() && !saw_done {
+                dispatch_openai_sse_event(&mut current_data, &mut saw_done, &mut tx).await;
+                if !saw_done {
+                    chunk_count += 1;
+                }
+            }
+
+            let elapsed = start.elapsed();
+            let end_reason = if saw_done { "[DONE]" } else { "EOF" };
+            tracing::info!(
+                provider = %provider_name,
+                model = %model_name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                chunk_count = chunk_count,
+                first_chunk_ms = first_chunk_time.map(|d| d.as_millis() as u64).unwrap_or(0),
+                end_reason = end_reason,
+                "streaming request end"
+            );
+        });
+
+        Ok(Box::pin(rx))
     }
 
     fn name(&self) -> &str { &self.config.name }
@@ -539,6 +620,42 @@ fn content_to_str(content: &MessageContent) -> String {
                 .join("\n")
         }
     }
+}
+
+/// Dispatch a complete SSE event's data lines as a StreamChunk.
+///
+/// Returns `false` if the channel has been closed (receiver dropped),
+/// `true` otherwise.
+async fn dispatch_openai_sse_event(
+    current_data: &mut Vec<String>,
+    saw_done: &mut bool,
+    tx: &mut mpsc::Sender<Result<StreamChunk, LlmError>>,
+) -> bool {
+    let payload = current_data.join("\n");
+    current_data.clear();
+
+    if payload == "[DONE]" {
+        *saw_done = true;
+        return true;
+    }
+
+    match serde_json::from_str::<StreamChunk>(&payload) {
+        Ok(chunk) => {
+            if tx.send(Ok(chunk)).await.is_err() {
+                return false;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "OpenAI Compatible SSE: skipping malformed event (len={}, err={}): {}",
+                payload.len(),
+                e,
+                payload.chars().take(120).collect::<String>()
+            );
+        }
+    }
+
+    true
 }
 
 /// Build OpenAI-compatible chat/completions JSON body (unit-testable).

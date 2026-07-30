@@ -19,6 +19,10 @@ pub struct StatusBarData {
     pub mode: String,
     /// Provider / model identifier, e.g. `"claude-sonnet-4"`
     pub model: String,
+    /// Session title (truncated to 20 chars on render).
+    pub session_title: String,
+    /// Thinking level: "default" | "low" | "medium" | "high" | "max".
+    pub thinking_level: String,
     /// Cumulative input tokens for the current request.
     pub input_tokens: u64,
     /// Cumulative output tokens for the current request.
@@ -33,6 +37,8 @@ pub struct StatusBarData {
     pub scroll_info: String,
     /// Focus indicator: "INPUT" or "CHAT".
     pub focus: String,
+    /// P2: 排队消息数（>0 时状态栏显示 📨N）。
+    pub queued_count: usize,
 }
 
 impl StatusBarData {
@@ -41,6 +47,8 @@ impl StatusBarData {
         Self {
             mode: "idle".into(),
             model: String::new(),
+            session_title: String::new(),
+            thinking_level: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             started_at: None,
@@ -48,6 +56,7 @@ impl StatusBarData {
             is_processing: false,
             scroll_info: String::new(),
             focus: String::from("INPUT"),
+            queued_count: 0,
         }
     }
 
@@ -119,16 +128,41 @@ impl StatusBar {
                 Span::styled(mode_icon, Theme::style_status_accent()),
                 Span::styled(" | ", Theme::style_status_bar()),
                 Span::styled(data.model.clone(), Theme::style_status_bar()),
-                Span::styled(" | ", Theme::style_status_bar()),
-                Span::styled(tokens, Theme::style_status_bar()),
-                Span::styled(" | ", Theme::style_status_bar()),
-                Span::styled(elapsed, Theme::style_status_bar()),
-                Span::styled(" | ", Theme::style_status_bar()),
-                Span::styled(branch, Theme::style_status_bar()),
             ];
+            if !data.session_title.is_empty() {
+                let title = if data.session_title.chars().count() > 20 {
+                    format!("{}…", data.session_title.chars().take(19).collect::<String>())
+                } else {
+                    data.session_title.clone()
+                };
+                spans.push(Span::styled(" | ", Theme::style_status_bar()));
+                spans.push(Span::styled(title, Theme::style_status_accent()));
+            }
+            if !data.thinking_level.is_empty() {
+                spans.push(Span::styled(" | ", Theme::style_status_bar()));
+                spans.push(Span::styled(
+                    format!("think:{}", data.thinking_level),
+                    Theme::style_status_accent(),
+                ));
+            }
+            spans.push(Span::styled(" | ", Theme::style_status_bar()));
+            spans.push(Span::styled(tokens, Theme::style_status_bar()));
+            spans.push(Span::styled(" | ", Theme::style_status_bar()));
+            spans.push(Span::styled(elapsed, Theme::style_status_bar()));
+            spans.push(Span::styled(" | ", Theme::style_status_bar()));
+            spans.push(Span::styled(branch, Theme::style_status_bar()));
             if !data.scroll_info.is_empty() {
                 spans.push(Span::styled(" | ", Theme::style_status_bar()));
                 spans.push(Span::styled(data.scroll_info.clone(), Theme::style_status_accent()));
+            }
+            if data.queued_count > 0 {
+                spans.push(Span::styled(" | ", Theme::style_status_bar()));
+                spans.push(
+                    Span::styled(
+                        format!("📨{}", data.queued_count),
+                        Theme::style_status_accent(),
+                    ),
+                );
             }
             spans.push(Span::styled(" | ", Theme::style_status_bar()));
             spans.push(Span::styled(data.focus.clone(), Theme::style_status_accent()));

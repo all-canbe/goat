@@ -27,19 +27,25 @@ describe("AddProviderDialog", () => {
     expect(dialog).toHaveAccessibleName("连接提供商");
   });
 
-  it("calls onClose when Escape pressed", () => {
+  it("does not call onClose when Escape pressed", () => {
     const onClose = vi.fn();
     render(<AddProviderDialog isOpen onClose={onClose} />);
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("calls onClose when overlay clicked", () => {
+  it("does not call onClose when overlay clicked", () => {
     const onClose = vi.fn();
     render(<AddProviderDialog isOpen onClose={onClose} />);
-    // 点击遮罩层（外层 fixed 容器）
     const overlay = screen.getByRole("dialog").parentElement!;
     fireEvent.click(overlay);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("calls onClose when close button clicked", () => {
+    const onClose = vi.fn();
+    render(<AddProviderDialog isOpen onClose={onClose} />);
+    fireEvent.click(screen.getByTitle("关闭"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

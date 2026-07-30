@@ -9,7 +9,7 @@ interface ChatAreaProps {
 
 export default function ChatArea({ onModeChange, onAddProvider, onManageProviders }: ChatAreaProps) {
   return (
-    <main className="flex-1 flex flex-col overflow-hidden">
+    <main className="relative flex-1 flex flex-col overflow-hidden">
       <MessageList />
       <InputPanel
         onModeChange={onModeChange}

@@ -32,6 +32,22 @@ describe("ModelPalette", () => {
     setProviders([]);
   });
 
+  it("does not show the global focus-visible outline on the model search input", () => {
+    render(
+      <ModelPalette
+        isOpen
+        onClose={vi.fn()}
+        variant="dropdown"
+        onAddProvider={vi.fn()}
+        onManageProviders={vi.fn()}
+      />
+    );
+
+    expect(screen.getByPlaceholderText("Search provider / model...")).toHaveClass(
+      "focus-visible:outline-none"
+    );
+  });
+
   it("dropdown shows all enabled providers regardless of source (settings/env/fallback)", () => {
     setProviders([
       { name: "Alpha", model: "a-model", provider_type: "openai_compatible", is_current: true, enabled: true, source: "settings" },
